@@ -9,6 +9,7 @@ runtime-version: "49"
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.llvm20
 command: librefood
 finish-args:
   - --share=ipc
@@ -22,9 +23,11 @@ modules:
   - name: librefood
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/rust-stable/bin
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin
+      prepend-ld-library-path: /usr/lib/sdk/llvm20/lib
       env:
         CARGO_HOME: /run/build/librefood/cargo
+        LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
       build-args:
         - --share=network
     sources:

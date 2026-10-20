@@ -1,14 +1,21 @@
 //! Webcam barcode scanning via nokhwa + rxing (ZXING port).
 //!
 //! On Linux this uses V4L2. We enumerate `/dev/video*` and nokhwa's device
-//! query, then try each index so Alpine/ARM setups that are not `/dev/video0`
-//! still work. Live RGB frames can be forwarded to the UI; decoding runs on
-//! the same capture loop.
+//! query, then try each numeric index so Alpine/ARM setups that are not
+//! `/dev/video0` still work. Live RGB frames can be forwarded to the UI;
+//! decoding runs on the same capture loop.
+//!
+//! Startup probe is optimistic when video nodes exist: the Scan button stays
+//! enabled and open failures are reported at scan time with actionable copy.
+//! Set `LIBREFOOD_CAMERA_DEBUG=1` for stderr enumeration / open details.
 
 use nokhwa::{
     pixel_format::RgbFormat,
     query,
-    utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType},
+    utils::{
+        ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
+        Resolution,
+    },
     Camera,
 };
 use rxing::{helpers::detect_in_luma, BarcodeFormat};
@@ -31,27 +38,41 @@ pub enum CameraError {
     Cancelled,
 }
 
-/// Result of probing for a usable capture device (without keeping it open).
+/// Result of probing for a capture device (without keeping it open).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CameraProbe {
     /// At least one device opened successfully.
     Ready,
     /// No `/dev/video*` nodes and nokhwa found nothing.
     Missing,
-    /// Nodes or candidates exist, but every open failed (permissions, busy, etc.).
-    PresentButUnusable { detail: String },
+    /// Nodes exist; open failed with permission denial (EACCES / video group).
+    PermissionDenied { detail: String },
+    /// Nodes exist; device reported busy.
+    Busy { detail: String },
+    /// Nodes exist; open failed for another reason (format, driver, etc.).
+    /// Scan stays enabled — retry at click time.
+    Present { detail: String },
 }
 
 impl CameraProbe {
+    /// Whether the Scan button should be clickable.
+    ///
+    /// Enabled whenever a device might work — including when startup open
+    /// failed — so Alpine ARM users are not stuck on a gray "blocked" button.
+    /// Only [`Missing`] disables Scan.
+    pub fn scan_enabled(&self) -> bool {
+        !matches!(self, Self::Missing)
+    }
+
     pub fn is_ready(&self) -> bool {
         matches!(self, Self::Ready)
     }
 
     pub fn scan_button_label(&self) -> &'static str {
         match self {
-            Self::Ready => "Scan with camera",
+            Self::Ready | Self::Present { .. } | Self::Busy { .. } => "Scan with camera",
+            Self::PermissionDenied { .. } => "Camera needs access — tap to retry",
             Self::Missing => "Camera unavailable — type a barcode",
-            Self::PresentButUnusable { .. } => "Camera blocked — type a barcode",
         }
     }
 
@@ -61,12 +82,33 @@ impl CameraProbe {
             Self::Missing => {
                 "No camera detected. Type or paste a barcode instead.".into()
             }
-            Self::PresentButUnusable { detail } => format!(
-                "Camera present but cannot be opened ({detail}). \
-                 Check `video` group / device permissions, or close other apps using it. \
+            Self::PermissionDenied { detail } => format!(
+                "Camera permission denied ({detail}). On Alpine: \
+                 `sudo adduser $USER video`, then log out and back in. \
                  Typed barcodes still work."
             ),
+            Self::Busy { detail } => format!(
+                "Camera is busy ({detail}). Close other apps using it, then try again. \
+                 Typed barcodes still work."
+            ),
+            Self::Present { detail } => format!(
+                "Camera found but could not be opened yet ({detail}). \
+                 Try Scan again, or type a barcode."
+            ),
         }
+    }
+}
+
+fn camera_debug_enabled() -> bool {
+    matches!(
+        std::env::var("LIBREFOOD_CAMERA_DEBUG").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
+    )
+}
+
+fn cam_debug(msg: impl AsRef<str>) {
+    if camera_debug_enabled() {
+        eprintln!("[librefood camera] {}", msg.as_ref());
     }
 }
 
@@ -78,16 +120,96 @@ pub fn camera_available() -> bool {
 
 /// Detailed probe used for UI labels and status text.
 pub fn camera_probe() -> CameraProbe {
+    let nodes = list_dev_video_nodes();
+    cam_debug(format!(
+        "probe start; /dev/video* = [{}]",
+        nodes
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+
     match open_camera() {
         Ok(mut cam) => {
+            cam_debug("probe: open OK");
             let _ = cam.stop_stream();
             CameraProbe::Ready
         }
-        Err(CameraError::NoCamera) => CameraProbe::Missing,
-        Err(CameraError::Open(detail)) => CameraProbe::PresentButUnusable { detail },
-        Err(e) => CameraProbe::PresentButUnusable {
-            detail: e.to_string(),
+        Err(CameraError::NoCamera) => {
+            cam_debug("probe: Missing");
+            CameraProbe::Missing
+        }
+        Err(CameraError::Open(detail)) => classify_probe_failure(&detail, &nodes),
+        Err(e) => classify_probe_failure(&e.to_string(), &nodes),
+    }
+}
+
+fn classify_probe_failure(detail: &str, nodes: &[PathBuf]) -> CameraProbe {
+    let kind = FailureKind::from_message(detail);
+    cam_debug(format!("probe fail kind={kind:?}: {detail}"));
+    if nodes.is_empty() && matches!(kind, FailureKind::Missing) {
+        return CameraProbe::Missing;
+    }
+    if nodes.is_empty() && !detail.to_lowercase().contains("video") {
+        // Queried indices only, nothing on disk — treat as missing.
+        if matches!(kind, FailureKind::Missing) {
+            return CameraProbe::Missing;
+        }
+    }
+    match kind {
+        FailureKind::Permission => CameraProbe::PermissionDenied {
+            detail: detail.to_string(),
         },
+        FailureKind::Busy => CameraProbe::Busy {
+            detail: detail.to_string(),
+        },
+        FailureKind::Missing if nodes.is_empty() => CameraProbe::Missing,
+        _ => {
+            if nodes.is_empty() {
+                CameraProbe::Missing
+            } else {
+                CameraProbe::Present {
+                    detail: detail.to_string(),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureKind {
+    Permission,
+    Busy,
+    Missing,
+    Other,
+}
+
+impl FailureKind {
+    fn from_message(msg: &str) -> Self {
+        let lower = msg.to_lowercase();
+        if lower.contains("permission")
+            || lower.contains("denied")
+            || lower.contains("eacces")
+            || lower.contains("operation not permitted")
+        {
+            Self::Permission
+        } else if lower.contains("busy")
+            || lower.contains("resource temporarily unavailable")
+            || lower.contains("in use")
+            || lower.contains("ebusy")
+        {
+            Self::Busy
+        } else if (lower.contains("no ") && lower.contains("device"))
+            || lower.contains("not found")
+            || lower.contains("no such file")
+            || lower.contains("enoent")
+            || lower.contains("unable to find")
+        {
+            Self::Missing
+        } else {
+            Self::Other
+        }
     }
 }
 
@@ -121,39 +243,48 @@ fn parse_video_index(path: &std::path::Path) -> Option<u32> {
         .ok()
 }
 
-/// Candidate camera indices: nokhwa query first, then `/dev/video*`, then 0..7.
+/// Whether this process looks like a Flatpak sandbox (portal path may apply).
+fn running_in_flatpak() -> bool {
+    std::path::Path::new("/.flatpak-info").exists()
+}
+
+/// Candidate camera indices: `/dev/video*` first (low numbers), then nokhwa query.
+/// Path-style string indices are skipped — nokhwa's Linux backend rejects them
+/// (`invalid digit found in string`).
 fn candidate_indices() -> Vec<CameraIndex> {
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
 
-    let push = |idx: CameraIndex, out: &mut Vec<CameraIndex>, seen: &mut std::collections::BTreeSet<String>| {
-        let key = idx.as_string();
-        if seen.insert(key) {
-            out.push(idx);
-        }
-    };
-
-    // Prefer Auto (platform native); fall back to explicit V4L2 on Linux.
-    for api in [ApiBackend::Auto, ApiBackend::Video4Linux] {
-        if let Ok(infos) = query(api) {
-            for info in infos {
-                push(info.index().clone(), &mut out, &mut seen);
+    let push =
+        |idx: CameraIndex, out: &mut Vec<CameraIndex>, seen: &mut std::collections::BTreeSet<String>| {
+            let key = idx.as_string();
+            if seen.insert(key) {
+                out.push(idx);
             }
-            if !out.is_empty() {
-                break;
-            }
-        }
-    }
+        };
 
+    // Prefer real V4L2 node numbers (video0 before metadata-only video1).
     for path in list_dev_video_nodes() {
         if let Some(n) = parse_video_index(&path) {
             push(CameraIndex::Index(n), &mut out, &mut seen);
-            // Also try path-style index for backends that accept device paths.
-            push(
-                CameraIndex::String(path.to_string_lossy().into_owned()),
-                &mut out,
-                &mut seen,
-            );
+        }
+    }
+
+    for api in [ApiBackend::Auto, ApiBackend::Video4Linux] {
+        match query(api) {
+            Ok(infos) => {
+                cam_debug(format!("nokhwa query({api:?}): {} device(s)", infos.len()));
+                for info in infos {
+                    cam_debug(format!(
+                        "  index={:?} name={} misc={}",
+                        info.index(),
+                        info.human_name(),
+                        info.misc()
+                    ));
+                    push(info.index().clone(), &mut out, &mut seen);
+                }
+            }
+            Err(e) => cam_debug(format!("nokhwa query({api:?}): {e}")),
         }
     }
 
@@ -163,54 +294,60 @@ fn candidate_indices() -> Vec<CameraIndex> {
         }
     }
 
+    cam_debug(format!(
+        "candidates: {}",
+        out.iter()
+            .map(|i| i.as_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    if running_in_flatpak() {
+        cam_debug("note: running under Flatpak (/.flatpak-info present)");
+    }
     out
 }
 
 fn try_open_index(index: CameraIndex) -> Result<Camera, String> {
-    // Prefer a stable mid-rate request; AbsoluteHighestFrameRate can fail on
-    // some V4L2 drivers (common on Alpine/ARM stacks).
+    // Alpine/ARM UVC stacks often reject AbsoluteHighestFrameRate; try several.
     let attempts = [
         RequestedFormatType::AbsoluteHighestFrameRate,
+        RequestedFormatType::AbsoluteHighestResolution,
         RequestedFormatType::None,
+        RequestedFormatType::HighestFrameRate(30),
+        RequestedFormatType::Closest(CameraFormat::new(
+            Resolution::new(640, 480),
+            FrameFormat::MJPEG,
+            30,
+        )),
+        RequestedFormatType::Closest(CameraFormat::new(
+            Resolution::new(640, 480),
+            FrameFormat::YUYV,
+            15,
+        )),
+        RequestedFormatType::Closest(CameraFormat::new(
+            Resolution::new(320, 240),
+            FrameFormat::YUYV,
+            30,
+        )),
     ];
     let mut last = String::new();
     for fmt_ty in attempts {
         let requested = RequestedFormat::new::<RgbFormat>(fmt_ty);
         match Camera::new(index.clone(), requested) {
-            Ok(cam) => return Ok(cam),
-            Err(e) => last = e.to_string(),
+            Ok(cam) => {
+                cam_debug(format!("open OK index={} fmt={fmt_ty:?}", index.as_string()));
+                return Ok(cam);
+            }
+            Err(e) => {
+                cam_debug(format!(
+                    "open FAIL index={} fmt={fmt_ty:?}: {e}",
+                    index.as_string()
+                ));
+                last = e.to_string();
+            }
         }
     }
     Err(last)
-}
-
-fn classify_open_failure(msg: &str) -> CameraError {
-    let lower = msg.to_lowercase();
-    let permissionish = lower.contains("permission")
-        || lower.contains("denied")
-        || lower.contains("eacces")
-        || lower.contains("busy")
-        || lower.contains("resource temporarily unavailable")
-        || lower.contains("in use")
-        || lower.contains("ebusy");
-    let missingish = (lower.contains("no ") && lower.contains("device"))
-        || lower.contains("not found")
-        || lower.contains("no such file")
-        || lower.contains("enoent")
-        || lower.contains("unable to find");
-
-    if permissionish {
-        CameraError::Open(msg.to_string())
-    } else if missingish && list_dev_video_nodes().is_empty() {
-        CameraError::NoCamera
-    } else if !list_dev_video_nodes().is_empty() {
-        // Nodes exist but this open failed — treat as unusable rather than missing.
-        CameraError::Open(msg.to_string())
-    } else if missingish {
-        CameraError::NoCamera
-    } else {
-        CameraError::Open(msg.to_string())
-    }
 }
 
 fn open_camera() -> Result<Camera, CameraError> {
@@ -234,9 +371,11 @@ fn open_camera() -> Result<Camera, CameraError> {
     }
 
     if nodes.is_empty() && attempted > 0 {
-        // Queried indices failed and no /dev/video* — truly missing / inaccessible.
         let detail = last_err.unwrap_or_else(|| "no capture device".into());
-        return Err(classify_open_failure(&detail));
+        return match FailureKind::from_message(&detail) {
+            FailureKind::Missing => Err(CameraError::NoCamera),
+            _ => Err(CameraError::Open(detail)),
+        };
     }
 
     let detail = last_err.unwrap_or_else(|| {
@@ -245,7 +384,6 @@ fn open_camera() -> Result<Camera, CameraError> {
             nodes.len()
         )
     });
-    // Prefer Open (permissions/busy) when nodes exist.
     if !nodes.is_empty() {
         Err(CameraError::Open(format!(
             "{detail}; devices: {}",
@@ -256,7 +394,10 @@ fn open_camera() -> Result<Camera, CameraError> {
                 .join(", ")
         )))
     } else {
-        Err(classify_open_failure(&detail))
+        match FailureKind::from_message(&detail) {
+            FailureKind::Missing => Err(CameraError::NoCamera),
+            _ => Err(CameraError::Open(detail)),
+        }
     }
 }
 
@@ -382,6 +523,13 @@ mod tests {
         assert_eq!(camera_available(), probe.is_ready());
         let _ = list_dev_video_nodes();
         let _ = candidate_indices();
+        // Scan is only disabled when nothing exists.
+        if !list_dev_video_nodes().is_empty() {
+            assert!(
+                probe.scan_enabled(),
+                "video nodes present => Scan must stay enabled, got {probe:?}"
+            );
+        }
     }
 
     #[test]
@@ -398,5 +546,69 @@ mod tests {
             parse_video_index(std::path::Path::new("/dev/video")),
             None
         );
+    }
+
+    #[test]
+    fn failure_kind_classifies_messages() {
+        assert_eq!(
+            FailureKind::from_message("Permission denied (EACCES)"),
+            FailureKind::Permission
+        );
+        assert_eq!(
+            FailureKind::from_message("Device or resource busy"),
+            FailureKind::Busy
+        );
+        assert_eq!(
+            FailureKind::from_message("No such file or directory"),
+            FailureKind::Missing
+        );
+        assert_eq!(
+            FailureKind::from_message("Failed to Fufill"),
+            FailureKind::Other
+        );
+    }
+
+    #[test]
+    fn probe_labels_never_say_blocked() {
+        let samples = [
+            CameraProbe::Ready,
+            CameraProbe::Missing,
+            CameraProbe::PermissionDenied {
+                detail: "EACCES".into(),
+            },
+            CameraProbe::Busy {
+                detail: "EBUSY".into(),
+            },
+            CameraProbe::Present {
+                detail: "Failed to Fufill".into(),
+            },
+        ];
+        for p in samples {
+            let label = p.scan_button_label().to_lowercase();
+            assert!(
+                !label.contains("blocked"),
+                "label must not say blocked: {label}"
+            );
+            assert!(
+                !p.unavailable_message().to_lowercase().contains("blocked"),
+                "status must not say blocked for {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_present_when_nodes_exist() {
+        let nodes = vec![PathBuf::from("/dev/video0")];
+        let p = classify_probe_failure("Failed to Fufill; devices: /dev/video0", &nodes);
+        assert!(matches!(p, CameraProbe::Present { .. }));
+        assert!(p.scan_enabled());
+    }
+
+    #[test]
+    fn classify_permission_when_denied() {
+        let nodes = vec![PathBuf::from("/dev/video0")];
+        let p = classify_probe_failure("Permission denied", &nodes);
+        assert!(matches!(p, CameraProbe::PermissionDenied { .. }));
+        assert!(p.scan_enabled());
     }
 }

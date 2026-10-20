@@ -35,7 +35,16 @@ Same list: [`alpine-dependencies.txt`](alpine-dependencies.txt).
 
 ## Camera
 
-Needs a V4L2 device (`/dev/video*`) and `video` group (or equivalent) access. If the camera is missing or blocked, type or paste a barcode instead.
+Needs a V4L2 device (`/dev/video*`) and `video` group access:
+
+```bash
+ls -l /dev/video*
+groups   # should include `video`
+# Alpine: sudo adduser $USER video   # then log out / in
+LIBREFOOD_CAMERA_DEBUG=1 ./target/release/librefood   # stderr probe details
+```
+
+If no camera is present the Scan button stays disabled; when a device exists Scan stays enabled and open errors show at click time. Typed barcodes always work.
 
 ## License
 

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Librefood
+GenericName=Nutri-Score lookup
+Comment=Scan a barcode and look up Nutri-Score via Open Food Facts
+Exec=librefood
+Icon=org.librefood.Librefood
+Terminal=false
+Type=Application
+Categories=Utility;Nutrition;
+Keywords=food;barcode;nutri-score;openfoodfacts;nutrition;
+StartupNotify=true
+DBusActivatable=false

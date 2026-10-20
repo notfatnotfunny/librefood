@@ -1,0 +1,35 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Flatpak local build caches / outputs
+/.flatpak-builder/
+/build-dir/
+/repo/
+/*.flatpak
+/.cargo-home/
+/cargo-vendor/
+/cargo-sources.json
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Secrets & local env (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials*
+*token*
+*pat*
+
+# Logs / temp
+*.log
+/tmp/

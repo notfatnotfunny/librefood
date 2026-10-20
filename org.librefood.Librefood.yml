@@ -1,0 +1,46 @@
+# Flathub-ready Flatpak manifest for Librefood.
+# Local build (network allowed for cargo): see README “Flatpak”.
+# For Flathub CI, replace the cargo network build with generated
+# flatpak-cargo-generator sources (cargo-sources.json) and --offline.
+
+app-id: org.librefood.Librefood
+runtime: org.gnome.Platform
+runtime-version: "49"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: librefood
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  # V4L2 webcam access for barcode scanning
+  - --device=all
+modules:
+  - name: librefood
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/librefood/cargo
+      build-args:
+        - --share=network
+    sources:
+      - type: dir
+        path: .
+        skip:
+          - .git
+          - target
+          - .flatpak-builder
+          - build-dir
+          - repo
+          - "*.flatpak"
+    build-commands:
+      - cargo build --release --locked
+      - install -Dm755 target/release/librefood /app/bin/librefood
+      - install -Dm644 data/org.librefood.Librefood.desktop /app/share/applications/org.librefood.Librefood.desktop
+      - install -Dm644 data/org.librefood.Librefood.metainfo.xml /app/share/metainfo/org.librefood.Librefood.metainfo.xml
+      - install -Dm644 data/icons/hicolor/scalable/apps/org.librefood.Librefood.svg /app/share/icons/hicolor/scalable/apps/org.librefood.Librefood.svg
+      - install -Dm644 data/icons/hicolor/128x128/apps/org.librefood.Librefood.png /app/share/icons/hicolor/128x128/apps/org.librefood.Librefood.png

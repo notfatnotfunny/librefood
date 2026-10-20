@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Librefood">
+  <rect width="128" height="128" rx="28" fill="#1a5c3a"/>
+  <path d="M64 22c-14 18-22 34-22 48a22 22 0 0 0 44 0c0-14-8-30-22-48z" fill="#7dcea0"/>
+  <path d="M64 36c-8 12-13 23-13 34a13 13 0 0 0 26 0c0-11-5-22-13-34z" fill="#e8f6ef"/>
+  <g fill="#e8f6ef">
+    <rect x="34" y="92" width="4" height="18" rx="1"/>
+    <rect x="42" y="92" width="3" height="18" rx="1"/>
+    <rect x="49" y="92" width="6" height="18" rx="1"/>
+    <rect x="58" y="92" width="3" height="18" rx="1"/>
+    <rect x="64" y="92" width="5" height="18" rx="1"/>
+    <rect x="72" y="92" width="3" height="18" rx="1"/>
+    <rect x="79" y="92" width="7" height="18" rx="1"/>
+    <rect x="90" y="92" width="4" height="18" rx="1"/>
+  </g>
+</svg>

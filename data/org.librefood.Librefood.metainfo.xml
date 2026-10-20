@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.librefood.Librefood</id>
+  <name>Librefood</name>
+  <summary>Scan a barcode, see its Nutri-Score</summary>
+  <developer id="org.librefood">
+    <name>Librefood contributors</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <content_rating type="oars-1.1" />
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <description>
+    <p>
+      Librefood is a native Linux desktop app that looks up a product’s Nutri-Score
+      from the public Open Food Facts database. Scan a barcode with your webcam,
+      or type/paste an EAN when no camera is available.
+    </p>
+    <p>
+      Results show the product name, optional brand/quantity, and a Nutri-Score
+      grade from A to E when Open Food Facts publishes one.
+    </p>
+  </description>
+  <launchable type="desktop-id">org.librefood.Librefood.desktop</launchable>
+  <url type="homepage">https://world.openfoodfacts.org/</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Live camera preview with barcode centering guide</caption>
+      <image>https://raw.githubusercontent.com/librefood/librefood/main/data/screenshots/camera-preview.png</image>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="0.1.0" date="2026-10-20">
+      <description>
+        <p>Initial release: barcode lookup, live camera preview, Nutri-Score display.</p>
+      </description>
+    </release>
+  </releases>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <recommends>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </recommends>
+</component>

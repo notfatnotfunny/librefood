@@ -28,7 +28,6 @@ See example files under `data/profiles/`:
 | `minimally-processed.json` | NOVA + additives |
 | `additive-conscious.json` | Additive-first |
 | `environmental-impact.json` | Eco-Score / organic / NOVA |
-| `blank.json` | Minimal starter for customization |
 
 Fields include weighted `criteria`, threshold `rules`, `caps`, `category_overrides`, `missing_data`, and `labels` for named categories on a custom numeric scale.
 
@@ -44,7 +43,7 @@ Fields include weighted `criteria`, threshold `rules`, `caps`, `category_overrid
 1. Look up a barcode (or search by name, or scan).
 2. Choose a profile in the dropdown — the same product is rescored immediately.
 3. **Compare** shows scores for every profile on the current product.
-4. **Profiles** page (header nav, or Lookup → Profiles) → list / set active / duplicate / edit on-page / import / export / restore built-ins; expand **How scoring works** for the engine order notes. Lookup keeps a compact profile dropdown for scoring only.
+4. **Profiles** page (bottom nav, or Search → Profiles) → list / set active / duplicate / edit customs / import / export; built-ins are read-only (Duplicate to customize). Expand **How scoring works** for engine notes. Search keeps a compact profile dropdown for scoring only.
 5. Calculation steps list each criterion’s id/attribute, raw value, rule adjust, weight, source, and Δ contribution.
 
 Custom scores are **not** official Nutri-Score grades and are **not** medical advice. OFF Nutri-Score letters, when present, are shown as source data only.

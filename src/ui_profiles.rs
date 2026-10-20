@@ -43,7 +43,6 @@ pub enum ProfilePageEvent {
     /// Import after the async path dialog completes.
     ImportPath(String),
     Delete,
-    RestoreBuiltins,
     CancelEdit,
     SaveEdit,
 }
@@ -198,7 +197,6 @@ pub fn rebuild_profile_actions(actions: &gtk::Box, emit: &Rc<dyn Fn(ProfilePageE
         ("Export JSON", ProfilePageEvent::Export, false),
         ("Import JSON", ProfilePageEvent::Import, false),
         ("Delete", ProfilePageEvent::Delete, false),
-        ("Restore built-ins", ProfilePageEvent::RestoreBuiltins, false),
     ];
 
     for (label, event, suggested) in buttons {
@@ -224,11 +222,13 @@ pub fn mount_profile_editor(
     clear_container(body);
     clear_container(footer);
 
-    if profile.builtin {
-        profile.id = format!("{}-custom", profile.id);
-        profile.name = format!("{} (custom)", profile.name);
-        profile.builtin = false;
-    }
+    // Built-ins are opened only after the caller refused Edit; keep as custom copy
+    // only if somehow reached (Duplicate is the supported path).
+    debug_assert!(
+        !profile.builtin,
+        "built-in profiles must not open in the editor"
+    );
+    profile.builtin = false;
 
     body.set_orientation(gtk::Orientation::Vertical);
     body.set_spacing(12);

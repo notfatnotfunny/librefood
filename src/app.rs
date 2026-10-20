@@ -52,6 +52,7 @@ pub enum Msg {
     ToggleFavorite,
     OpenLibraryBarcode(String),
     ClearHistory,
+    HistoryFilterChanged(String),
     RemoveFavorite(String),
 }
 
@@ -96,6 +97,8 @@ enum StatusKind {
 pub struct AppModel {
     barcode: String,
     search_query: String,
+    /// Filter text for the History page list.
+    history_filter: String,
     status_kind: StatusKind,
     status_text: String,
     product: Option<ProductModel>,
@@ -320,14 +323,6 @@ impl AppModel {
         }
     }
 
-    fn page_subtitle(&self) -> &'static str {
-        match self.page {
-            AppPage::Lookup => "Lookup",
-            AppPage::History => "History",
-            AppPage::Favorites => "Favorites",
-            AppPage::Profiles => "Profiles",
-        }
-    }
 
     fn is_favorite(&self) -> bool {
         self.product
@@ -553,6 +548,11 @@ fn handle_profiles_event(
                 model.profiles_status = format!("Unknown profile `{id}`");
                 return;
             };
+            if profile.builtin {
+                model.profiles_status =
+                    "Built-in profiles can’t be edited — Duplicate to customize.".into();
+                return;
+            }
             model.editing_profile = true;
             model.profile_editor = Some(ui_profiles::mount_profile_editor(
                 &widgets.profiles_editor_body,
@@ -617,18 +617,6 @@ fn handle_profiles_event(
                 Err(e) => model.profiles_status = e,
             }
         }
-        ProfilePageEvent::RestoreBuiltins => match model.store.restore_builtins() {
-            Ok(()) => {
-                model.selected_profile_id = Some(model.store.active_id().to_string());
-                model.rebuild_profile_lists();
-                sync_profile_dropdown(widgets, model);
-                model.profiles_status =
-                    "Built-in profiles restored from embedded defaults (user customs kept)."
-                        .into();
-                schedule_profiles_ui_refresh(&sender);
-            }
-            Err(e) => model.profiles_status = e,
-        },
         ProfilePageEvent::CancelEdit => {
             model.editing_profile = false;
             model.profile_editor = None;
@@ -677,18 +665,40 @@ fn handle_profiles_event(
 fn rebuild_history_list(
     container: &gtk::Box,
     entries: &[LibraryEntry],
+    filter: &str,
     sender: &ComponentSender<AppModel>,
 ) {
     clear_box(container);
+    let q = filter.trim().to_ascii_lowercase();
+    let filtered: Vec<&LibraryEntry> = if q.is_empty() {
+        entries.iter().collect()
+    } else {
+        entries
+            .iter()
+            .filter(|e| {
+                e.name.to_ascii_lowercase().contains(&q)
+                    || e.barcode.to_ascii_lowercase().contains(&q)
+                    || e.subtitle().to_ascii_lowercase().contains(&q)
+            })
+            .collect()
+    };
     if entries.is_empty() {
-        let empty = gtk::Label::new(Some("No history yet — look up a product to start."));
+        let empty = gtk::Label::new(Some("No history yet — search or scan a product to start."));
         empty.add_css_class("dim-label");
         empty.set_halign(gtk::Align::Start);
         empty.set_xalign(0.0);
         container.append(&empty);
         return;
     }
-    for entry in entries {
+    if filtered.is_empty() {
+        let empty = gtk::Label::new(Some("No history matches that search."));
+        empty.add_css_class("dim-label");
+        empty.set_halign(gtk::Align::Start);
+        empty.set_xalign(0.0);
+        container.append(&empty);
+        return;
+    }
+    for entry in filtered {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         row.set_hexpand(true);
         row.add_css_class("library-row");
@@ -893,8 +903,6 @@ impl Component for AppModel {
                     #[wrap(Some)]
                     set_title_widget = &adw::WindowTitle {
                         set_title: "Librefood",
-                        #[watch]
-                        set_subtitle: model.page_subtitle(),
                     },
                 },
 
@@ -1338,13 +1346,6 @@ impl Component for AppModel {
                             },
                         },
 
-                        gtk::Label {
-                            set_label: "Scores are Librefood heuristics from Open Food Facts source data and your active profile — not Yuka, not an official Nutri-Score, and not medical advice.",
-                            add_css_class: "caption",
-                            set_halign: gtk::Align::Start,
-                            set_wrap: true,
-                            set_xalign: 0.0,
-                        },
                     },
                 },
 
@@ -1370,12 +1371,13 @@ impl Component for AppModel {
                             set_halign: gtk::Align::Start,
                             set_xalign: 0.0,
                         },
-                        gtk::Label {
-                            set_label: "Recent lookups and scans (newest first). Tap a row to open.",
-                            add_css_class: "dim-label",
-                            set_halign: gtk::Align::Start,
-                            set_wrap: true,
-                            set_xalign: 0.0,
+                        #[name = "history_search"]
+                        gtk::Entry {
+                            set_hexpand: true,
+                            set_placeholder_text: Some("Search history…"),
+                            connect_changed[sender] => move |entry| {
+                                sender.input(Msg::HistoryFilterChanged(entry.text().to_string()));
+                            },
                         },
                         gtk::Button {
                             set_label: "Clear history",
@@ -1415,13 +1417,6 @@ impl Component for AppModel {
                             set_halign: gtk::Align::Start,
                             set_xalign: 0.0,
                         },
-                        gtk::Label {
-                            set_label: "Products you starred. Tap a row to open, or remove from here.",
-                            add_css_class: "dim-label",
-                            set_halign: gtk::Align::Start,
-                            set_wrap: true,
-                            set_xalign: 0.0,
-                        },
                         #[name = "favorites_list"]
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
@@ -1455,15 +1450,6 @@ impl Component for AppModel {
                                 set_label: "Profiles",
                                 add_css_class: "brand-title",
                                 set_halign: gtk::Align::Start,
-                                set_xalign: 0.0,
-                            },
-                            gtk::Label {
-                                set_label: "Declarative JSON scoring profiles — not medical advice. Select one, then Edit on this page.",
-                                add_css_class: "dim-label",
-                                set_halign: gtk::Align::Start,
-                                set_wrap: true,
-                                set_wrap_mode: gtk::pango::WrapMode::WordChar,
-                                set_ellipsize: gtk::pango::EllipsizeMode::None,
                                 set_xalign: 0.0,
                             },
                             gtk::Expander {
@@ -1553,7 +1539,7 @@ impl Component for AppModel {
                     add_css_class: "bottom-nav",
 
                     gtk::Button {
-                        set_label: "Lookup",
+                        set_label: "Search",
                         set_hexpand: true,
                         #[watch]
                         set_css_classes: &model.nav_classes(AppPage::Lookup),
@@ -1616,6 +1602,7 @@ impl Component for AppModel {
         let mut model = AppModel {
             barcode: initial.clone().unwrap_or_default(),
             search_query: String::new(),
+            history_filter: String::new(),
             status_kind: StatusKind::Idle,
             status_text: "Enter a barcode, search by name, or use the camera.".into(),
             product: None,
@@ -1687,7 +1674,12 @@ impl Component for AppModel {
                 },
             );
         }
-        rebuild_history_list(&widgets.history_list, model.history.entries(), &sender);
+        rebuild_history_list(
+            &widgets.history_list,
+            model.history.entries(),
+            &model.history_filter,
+            &sender,
+        );
         rebuild_favorites_list(&widgets.favorites_list, model.favorites.entries(), &sender);
         refresh_profiles_page(&widgets, &model, &sender);
         if model.page == AppPage::Profiles {
@@ -1737,6 +1729,19 @@ impl Component for AppModel {
             let sender_l = sender.clone();
             gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
                 sender_l.input(Msg::Lookup);
+            });
+        }
+
+        // No autofocus at startup — avoid OSK popping the EAN field on phones.
+        {
+            use gtk::prelude::GtkWindowExt;
+            let win = root.clone();
+            gtk::glib::idle_add_local_once(move || {
+                GtkWindowExt::set_focus(&win, None::<&gtk::Widget>);
+            });
+            let win2 = root.clone();
+            gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(80), move || {
+                GtkWindowExt::set_focus(&win2, None::<&gtk::Widget>);
             });
         }
 
@@ -1860,6 +1865,7 @@ impl Component for AppModel {
                     rebuild_history_list(
                         &widgets.history_list,
                         self.history.entries(),
+                        &self.history_filter,
                         &sender,
                     );
                     if let Some(s) = &self.summary {
@@ -1926,7 +1932,12 @@ impl Component for AppModel {
             Msg::Rescore => {
                 self.rescore();
                 self.record_current_to_history();
-                rebuild_history_list(&widgets.history_list, self.history.entries(), &sender);
+                rebuild_history_list(
+                    &widgets.history_list,
+                    self.history.entries(),
+                    &self.history_filter,
+                    &sender,
+                );
                 if let Some(s) = &self.summary {
                     self.status_text = format!(
                         "Rescored — {} ({}) via “{}”.",
@@ -1939,7 +1950,7 @@ impl Component for AppModel {
             }
             Msg::CompareProfiles => {
                 let Some(product) = &self.product else {
-                    self.status_text = "Look up a product before comparing profiles.".into();
+                    self.status_text = "Search a product before comparing profiles.".into();
                     self.update_view(widgets, sender);
                     return;
                 };
@@ -1975,6 +1986,7 @@ impl Component for AppModel {
                     rebuild_history_list(
                         &widgets.history_list,
                         self.history.entries(),
+                        &self.history_filter,
                         &sender,
                     );
                 } else if page == AppPage::Favorites {
@@ -1992,7 +2004,7 @@ impl Component for AppModel {
             }
             Msg::ToggleFavorite => {
                 let (Some(product), Some(summary)) = (&self.product, &self.summary) else {
-                    self.status_text = "Look up a product before favoriting.".into();
+                    self.status_text = "Search a product before favoriting.".into();
                     self.update_view(widgets, sender);
                     return;
                 };
@@ -2026,7 +2038,23 @@ impl Component for AppModel {
                 } else {
                     self.status_text = "History cleared.".into();
                 }
-                rebuild_history_list(&widgets.history_list, self.history.entries(), &sender);
+                self.history_filter.clear();
+                widgets.history_search.set_text("");
+                rebuild_history_list(
+                    &widgets.history_list,
+                    self.history.entries(),
+                    &self.history_filter,
+                    &sender,
+                );
+            }
+            Msg::HistoryFilterChanged(text) => {
+                self.history_filter = text;
+                rebuild_history_list(
+                    &widgets.history_list,
+                    self.history.entries(),
+                    &self.history_filter,
+                    &sender,
+                );
             }
             Msg::RemoveFavorite(code) => {
                 if let Err(e) = self.favorites.remove(&code) {
@@ -2583,20 +2611,24 @@ fn load_css() {
             background-color: alpha(@window_fg_color, 0.16);
         }
         .bottom-nav-idle {
-            opacity: 1;
+            opacity: 0.72;
+            font-weight: 500;
         }
-        /* Tint + underline — readable in light and dark (avoid accent_fg on accent_bg). */
+        /* Minimal active mark — weight/opacity only, no border or filled box. */
         .bottom-nav-active {
             font-weight: 700;
             color: @window_fg_color;
-            background-color: alpha(@accent_bg_color, 0.38);
-            box-shadow: inset 0 -3px 0 0 @accent_bg_color;
+            background-color: transparent;
+            opacity: 1;
+            box-shadow: none;
+            border: none;
+            outline: none;
         }
         .bottom-nav-active:hover,
         .bottom-nav-active:active {
             color: @window_fg_color;
-            background-color: alpha(@accent_bg_color, 0.50);
-            box-shadow: inset 0 -3px 0 0 @accent_bg_color;
+            background-color: alpha(@window_fg_color, 0.08);
+            box-shadow: none;
             opacity: 1;
         }
         .library-row {

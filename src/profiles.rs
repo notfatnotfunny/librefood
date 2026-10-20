@@ -22,7 +22,6 @@ const BUILTINS: &[(&str, &str)] = &[
         "environmental-impact",
         include_str!("../data/profiles/environmental-impact.json"),
     ),
-    ("blank", include_str!("../data/profiles/blank.json")),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -46,6 +45,11 @@ impl ProfileStore {
 
     pub fn open(root: PathBuf) -> Result<Self, String> {
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        // Drop legacy blank built-in / leftover blank.json (no longer shipped).
+        let blank_path = root.join("blank.json");
+        if blank_path.exists() {
+            let _ = fs::remove_file(&blank_path);
+        }
         let mut profiles = Vec::new();
         for (_, json) in BUILTINS {
             let mut p: ScoringProfile =
@@ -54,7 +58,7 @@ impl ProfileStore {
             p.validate()?;
             profiles.push(p);
         }
-        // User overrides / custom profiles (JSON files in root)
+        // User custom profiles only — never overwrite built-in ids from disk.
         if let Ok(entries) = fs::read_dir(&root) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -67,12 +71,16 @@ impl ProfileStore {
                 let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
                 let mut p: ScoringProfile = serde_json::from_str(&text)
                     .map_err(|e| format!("parse {}: {e}", path.display()))?;
+                if is_builtin_id(&p.id) || p.id == "blank" {
+                    // Ignore attempts to shadow built-ins; remove stale blank.
+                    if p.id == "blank" {
+                        let _ = fs::remove_file(&path);
+                    }
+                    continue;
+                }
                 p.builtin = false;
                 p.validate()?;
-                // Replace builtin with same id if user saved a customized copy
-                if let Some(idx) = profiles.iter().position(|x| x.id == p.id) {
-                    profiles[idx] = p;
-                } else {
+                if !profiles.iter().any(|x| x.id == p.id) {
                     profiles.push(p);
                 }
             }
@@ -128,6 +136,11 @@ impl ProfileStore {
     }
 
     pub fn save(&mut self, mut profile: ScoringProfile) -> Result<(), String> {
+        if is_builtin_id(&profile.id) {
+            return Err(
+                "cannot overwrite a built-in profile — Duplicate it, then edit the copy".into(),
+            );
+        }
         profile.builtin = false;
         profile.validate()?;
         let path = self.root.join(format!("{}.json", sanitize_id(&profile.id)));
@@ -145,32 +158,17 @@ impl ProfileStore {
         let Some(p) = self.get(id) else {
             return Err(format!("unknown profile `{id}`"));
         };
-        if p.builtin && !self.root.join(format!("{}.json", sanitize_id(id))).exists() {
-            return Err("cannot delete built-in template (duplicate it first)".into());
+        if p.builtin || is_builtin_id(id) {
+            return Err("cannot delete built-in profiles".into());
         }
         let path = self.root.join(format!("{}.json", sanitize_id(id)));
         if path.exists() {
             fs::remove_file(&path).map_err(|e| e.to_string())?;
         }
-        // Reload builtins underneath if we deleted an override
         self.profiles.retain(|p| p.id != id);
-        if !self.profiles.iter().any(|p| p.id == id) {
-            if let Some((_, json)) = BUILTINS.iter().find(|(bid, _)| *bid == id) {
-                let mut builtin: ScoringProfile =
-                    serde_json::from_str(json).map_err(|e| e.to_string())?;
-                builtin.builtin = true;
-                self.profiles.push(builtin);
-            }
-        }
         if self.active_id == id {
             self.active_id = "nutrition-quality".into();
             self.persist_meta()?;
-        }
-        // Ensure still present
-        if self.get(id).is_none() && BUILTINS.iter().any(|(bid, _)| *bid == id) {
-            // restored above
-        } else if self.get(id).is_none() {
-            // fully removed custom
         }
         Ok(())
     }
@@ -229,17 +227,6 @@ impl ProfileStore {
         serde_json::to_string_pretty(p).map_err(|e| e.to_string())
     }
 
-    pub fn restore_builtins(&mut self) -> Result<(), String> {
-        for (id, _) in BUILTINS {
-            let path = self.root.join(format!("{}.json", id));
-            if path.exists() {
-                fs::remove_file(&path).map_err(|e| e.to_string())?;
-            }
-        }
-        *self = Self::open(self.root.clone())?;
-        Ok(())
-    }
-
     fn persist_meta(&self) -> Result<(), String> {
         let meta = StoreMeta {
             active_id: Some(self.active_id.clone()),
@@ -260,6 +247,10 @@ fn config_dir() -> Result<PathBuf, String> {
     }
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     Ok(PathBuf::from(home).join(".config/librefood"))
+}
+
+fn is_builtin_id(id: &str) -> bool {
+    BUILTINS.iter().any(|(bid, _)| *bid == id)
 }
 
 fn sanitize_id(id: &str) -> String {
@@ -389,12 +380,21 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let mut store = ProfileStore::open(dir.clone()).unwrap();
-        assert!(store.list().len() >= 5);
+        assert_eq!(store.list().len(), 4);
+        assert!(!store.list().iter().any(|p| p.id == "blank"));
         store.set_active("additive-conscious").unwrap();
         assert_eq!(store.active_id(), "additive-conscious");
-        let dup = store.duplicate("blank", "My Custom").unwrap();
+        let dup = store.duplicate("nutrition-quality", "My Custom").unwrap();
         assert!(!dup.builtin);
         assert_eq!(dup.name, "My Custom");
+        assert!(store
+            .save({
+                let mut p = store.get("nutrition-quality").unwrap().clone();
+                p.name = "hacked".into();
+                p
+            })
+            .is_err());
+        assert!(store.delete("nutrition-quality").is_err());
         let exported = store.export_json(&dup.id).unwrap();
         assert!(exported.contains("My Custom"));
         let imported = store

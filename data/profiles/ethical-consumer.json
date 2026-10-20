@@ -25,7 +25,7 @@
         {
           "when": { "op": "eq", "value": 1 },
           "adjust": -65,
-          "label": "Brand matched on boycottisraeli.biz",
+          "label": "Brand listed — see why & alternatives",
           "tone": "poor"
         },
         {

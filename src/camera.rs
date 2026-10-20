@@ -118,7 +118,44 @@ pub fn camera_available() -> bool {
     camera_probe().is_ready()
 }
 
-/// Detailed probe used for UI labels and status text.
+/// Fast startup probe: list capture nodes only — **does not open** the camera.
+///
+/// Opening V4L2 during `GApplication` init can hang the main loop; a stuck
+/// primary then makes later launches fail with `Failed to register: Timeout`.
+pub fn camera_probe_quick() -> CameraProbe {
+    let capture = list_capture_video_nodes();
+    let all_nodes = list_dev_video_nodes();
+    cam_debug(format!(
+        "quick probe; all=[{}] capture=[{}]",
+        all_nodes
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        capture
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    if capture.is_empty() {
+        if all_nodes.is_empty() {
+            CameraProbe::Missing
+        } else {
+            // Nodes exist but none are capture — treat as missing for the button.
+            CameraProbe::Missing
+        }
+    } else {
+        CameraProbe::Present {
+            detail: format!(
+                "found {} capture device(s); open deferred until Scan",
+                capture.len()
+            ),
+        }
+    }
+}
+
+/// Detailed probe used at Scan time (opens the device).
 pub fn camera_probe() -> CameraProbe {
     let capture = list_capture_video_nodes();
     let all_nodes = list_dev_video_nodes();
@@ -604,6 +641,18 @@ mod tests {
                 probe.scan_enabled(),
                 "capture nodes present => Scan must stay enabled, got {probe:?}"
             );
+        }
+    }
+
+    #[test]
+    fn quick_probe_does_not_open() {
+        let q = camera_probe_quick();
+        let capture = list_capture_video_nodes();
+        if capture.is_empty() {
+            assert!(!q.scan_enabled());
+        } else {
+            assert!(q.scan_enabled());
+            assert!(matches!(q, CameraProbe::Present { .. }));
         }
     }
 

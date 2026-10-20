@@ -1,7 +1,8 @@
-//! Main Relm4 + libadwaita window: adaptive barcode → Nutri-Score lookup.
+//! Main Relm4 + libadwaita window: adaptive barcode → Librefood score details.
 
 use crate::camera::{self, CameraError};
 use crate::off::{self, LookupError, ProductInfo};
+use crate::score::FactorStatus;
 use adw::prelude::AdwApplicationWindowExt;
 use gtk::gdk;
 use gtk::prelude::*;
@@ -60,6 +61,7 @@ pub struct AppModel {
     status_kind: StatusKind,
     status_text: String,
     product: Option<ProductInfo>,
+    product_image: Option<gdk::Texture>,
     camera_ok: bool,
     scanning: bool,
     preview: Option<gdk::Texture>,
@@ -68,30 +70,6 @@ pub struct AppModel {
 }
 
 impl AppModel {
-    fn grade_label(&self) -> String {
-        match &self.product {
-            Some(p) => match p.nutriscore_grade {
-                Some(g) => format!("Nutri-Score {}", g.to_ascii_uppercase()),
-                None => "No Nutri-Score".into(),
-            },
-            None => "—".into(),
-        }
-    }
-
-    fn grade_css(&self) -> &'static str {
-        match &self.product {
-            Some(p) => match p.nutriscore_grade {
-                Some('a') | Some('A') => "nutri-a",
-                Some('b') | Some('B') => "nutri-b",
-                Some('c') | Some('C') => "nutri-c",
-                Some('d') | Some('D') => "nutri-d",
-                Some('e') | Some('E') => "nutri-e",
-                _ => "nutri-none",
-            },
-            None => "nutri-none",
-        }
-    }
-
     fn product_name(&self) -> String {
         self.product
             .as_ref()
@@ -99,20 +77,65 @@ impl AppModel {
             .unwrap_or_default()
     }
 
-    fn product_meta(&self) -> String {
+    fn product_brand(&self) -> String {
+        self.product
+            .as_ref()
+            .and_then(|p| p.brand_primary.clone().or_else(|| p.brands.clone()))
+            .unwrap_or_default()
+    }
+
+    fn score_text(&self) -> String {
+        match &self.product {
+            Some(p) => format!("{}/100", p.score.score),
+            None => "—/100".into(),
+        }
+    }
+
+    fn score_label_text(&self) -> String {
+        self.product
+            .as_ref()
+            .map(|p| p.score.label.to_string())
+            .unwrap_or_default()
+    }
+
+    fn score_dot_classes(&self) -> [&'static str; 2] {
+        match &self.product {
+            Some(p) => match p.score.status {
+                FactorStatus::Good => ["score-dot", "score-dot-good"],
+                FactorStatus::Mediocre => ["score-dot", "score-dot-mediocre"],
+                FactorStatus::Poor => ["score-dot", "score-dot-poor"],
+            },
+            None => ["score-dot", "score-dot-poor"],
+        }
+    }
+
+    fn nutri_caption(&self) -> String {
         let Some(p) = &self.product else {
             return String::new();
         };
-        let mut meta = format!("Barcode {}", p.barcode);
-        if let Some(b) = &p.brands {
-            meta.push_str(" · ");
-            meta.push_str(b);
+        let mut parts = Vec::new();
+        if let Some(g) = p.nutriscore_grade {
+            parts.push(format!("Nutri-Score {}", g.to_ascii_uppercase()));
         }
+        parts.push(format!("Barcode {}", p.barcode));
         if let Some(q) = &p.quantity {
-            meta.push_str(" · ");
-            meta.push_str(q);
+            parts.push(q.clone());
         }
-        meta
+        parts.join(" · ")
+    }
+
+    fn has_negatives(&self) -> bool {
+        self.product
+            .as_ref()
+            .map(|p| !p.score.negatives.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn has_positives(&self) -> bool {
+        self.product
+            .as_ref()
+            .map(|p| !p.score.positives.is_empty())
+            .unwrap_or(false)
     }
 
     fn status_css(&self) -> &'static str {
@@ -132,6 +155,20 @@ impl AppModel {
         }
     }
 
+    fn header_orientation(&self) -> gtk::Orientation {
+        match self.width_class {
+            UiWidth::Compact => gtk::Orientation::Vertical,
+            UiWidth::Medium | UiWidth::Wide => gtk::Orientation::Horizontal,
+        }
+    }
+
+    fn factors_orientation(&self) -> gtk::Orientation {
+        match self.width_class {
+            UiWidth::Wide => gtk::Orientation::Horizontal,
+            _ => gtk::Orientation::Vertical,
+        }
+    }
+
     fn scan_label(&self) -> &'static str {
         if self.camera_ok {
             "Scan with camera"
@@ -141,18 +178,70 @@ impl AppModel {
     }
 }
 
+fn clear_box(container: &gtk::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+}
+
+fn append_factor_rows(container: &gtk::Box, rows: &[crate::score::FactorRow]) {
+    clear_box(container);
+    for row in rows {
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        line.set_hexpand(true);
+        line.add_css_class("factor-row");
+
+        let text_col = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        text_col.set_hexpand(true);
+        text_col.set_halign(gtk::Align::Start);
+
+        let title = gtk::Label::new(Some(row.title));
+        title.add_css_class("factor-title");
+        title.set_halign(gtk::Align::Start);
+        title.set_xalign(0.0);
+
+        let detail = gtk::Label::new(Some(&row.detail));
+        detail.add_css_class("factor-detail");
+        detail.set_halign(gtk::Align::Start);
+        detail.set_wrap(true);
+        detail.set_xalign(0.0);
+
+        text_col.append(&title);
+        text_col.append(&detail);
+
+        let value = gtk::Label::new(Some(&row.value_label));
+        value.add_css_class("factor-value");
+        value.set_valign(gtk::Align::Center);
+
+        let dot = gtk::Label::new(Some("●"));
+        dot.set_valign(gtk::Align::Center);
+        let (c1, c2) = match row.status {
+            FactorStatus::Good => ("status-dot", "dot-good"),
+            FactorStatus::Mediocre => ("status-dot", "dot-mediocre"),
+            FactorStatus::Poor => ("status-dot", "dot-poor"),
+        };
+        dot.set_css_classes(&[c1, c2]);
+
+        line.append(&text_col);
+        line.append(&value);
+        line.append(&dot);
+        container.append(&line);
+    }
+}
+
 #[relm4::component(pub)]
-impl SimpleComponent for AppModel {
+impl Component for AppModel {
     type Init = Option<String>;
     type Input = Msg;
     type Output = ();
+    type CommandOutput = ();
 
     view! {
         #[root]
         adw::ApplicationWindow {
             set_title: Some("Librefood"),
             set_default_width: 480,
-            set_default_height: 640,
+            set_default_height: 720,
             set_width_request: 360,
 
             #[wrap(Some)]
@@ -163,7 +252,7 @@ impl SimpleComponent for AppModel {
                     #[wrap(Some)]
                     set_title_widget = &adw::WindowTitle {
                         set_title: "Librefood",
-                        set_subtitle: "Nutri-Score via Open Food Facts",
+                        set_subtitle: "Product score via Open Food Facts",
                     },
                 },
 
@@ -190,7 +279,7 @@ impl SimpleComponent for AppModel {
                             set_xalign: 0.0,
                         },
                         gtk::Label {
-                            set_label: "Scan or enter a barcode to see its Nutri-Score from Open Food Facts.",
+                            set_label: "Scan or enter a barcode for a detailed score from Open Food Facts data.",
                             add_css_class: "dim-label",
                             set_halign: gtk::Align::Start,
                             set_wrap: true,
@@ -210,8 +299,6 @@ impl SimpleComponent for AppModel {
                                 set_placeholder_text: Some("EAN-13 barcode…"),
                                 set_input_purpose: gtk::InputPurpose::Digits,
                                 set_activates_default: true,
-                                // Entry text is owned by the widget; model tracks via changed.
-                                // (Do not #[watch] set_text — it fights typing/paste.)
                                 connect_changed[sender] => move |entry| {
                                     sender.input(Msg::BarcodeChanged(entry.text().to_string()));
                                 },
@@ -245,7 +332,6 @@ impl SimpleComponent for AppModel {
                             },
                         },
 
-                        // Live camera preview with centering guide.
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
                             set_spacing: 10,
@@ -313,45 +399,166 @@ impl SimpleComponent for AppModel {
                             set_visible: matches!(model.status_kind, StatusKind::Loading) || model.scanning,
                         },
 
+                        // —— Score detail panel (Yuka-like layout) ——
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
-                            set_spacing: 12,
+                            set_spacing: 16,
                             #[watch]
                             set_visible: model.product.is_some(),
                             add_css_class: "result-panel",
 
-                            gtk::Label {
+                            gtk::Box {
                                 #[watch]
-                                set_label: &model.grade_label(),
-                                #[watch]
-                                set_css_classes: &["nutri-badge", model.grade_css()],
-                                set_halign: gtk::Align::Start,
-                                set_valign: gtk::Align::Center,
+                                set_orientation: model.header_orientation(),
+                                set_spacing: 16,
+                                set_hexpand: true,
+
+                                gtk::Picture {
+                                    set_content_fit: gtk::ContentFit::Cover,
+                                    set_can_shrink: false,
+                                    set_width_request: 96,
+                                    set_height_request: 96,
+                                    set_halign: gtk::Align::Start,
+                                    set_valign: gtk::Align::Start,
+                                    set_hexpand: false,
+                                    set_vexpand: false,
+                                    #[watch]
+                                    set_visible: model.product_image.is_some(),
+                                    #[watch]
+                                    set_paintable: model.product_image.as_ref(),
+                                    add_css_class: "product-image",
+                                },
+
+                                gtk::Box {
+                                    set_orientation: gtk::Orientation::Vertical,
+                                    set_spacing: 4,
+                                    set_hexpand: true,
+                                    set_valign: gtk::Align::Center,
+
+                                    gtk::Label {
+                                        #[watch]
+                                        set_label: &model.product_name(),
+                                        add_css_class: "product-name",
+                                        set_halign: gtk::Align::Start,
+                                        set_wrap: true,
+                                        set_xalign: 0.0,
+                                        set_selectable: true,
+                                    },
+                                    gtk::Label {
+                                        #[watch]
+                                        set_label: &model.product_brand(),
+                                        add_css_class: "product-brand",
+                                        set_halign: gtk::Align::Start,
+                                        set_wrap: true,
+                                        set_xalign: 0.0,
+                                        #[watch]
+                                        set_visible: !model.product_brand().is_empty(),
+                                    },
+
+                                    gtk::Box {
+                                        set_orientation: gtk::Orientation::Horizontal,
+                                        set_spacing: 10,
+                                        set_margin_top: 8,
+                                        set_halign: gtk::Align::Start,
+
+                                        gtk::Label {
+                                            set_label: "●",
+                                            #[watch]
+                                            set_css_classes: &model.score_dot_classes(),
+                                            set_valign: gtk::Align::Center,
+                                        },
+                                        gtk::Box {
+                                            set_orientation: gtk::Orientation::Vertical,
+                                            set_spacing: 0,
+
+                                            gtk::Label {
+                                                #[watch]
+                                                set_label: &model.score_text(),
+                                                add_css_class: "score-number",
+                                                set_halign: gtk::Align::Start,
+                                                set_xalign: 0.0,
+                                            },
+                                            gtk::Label {
+                                                #[watch]
+                                                set_label: &model.score_label_text(),
+                                                add_css_class: "score-label",
+                                                set_halign: gtk::Align::Start,
+                                                set_xalign: 0.0,
+                                            },
+                                        },
+                                    },
+
+                                    gtk::Label {
+                                        #[watch]
+                                        set_label: &model.nutri_caption(),
+                                        add_css_class: "dim-label",
+                                        set_halign: gtk::Align::Start,
+                                        set_wrap: true,
+                                        set_xalign: 0.0,
+                                        set_margin_top: 4,
+                                        set_selectable: true,
+                                    },
+                                },
                             },
 
-                            gtk::Label {
+                            gtk::Box {
                                 #[watch]
-                                set_label: &model.product_name(),
-                                add_css_class: "product-name",
-                                set_halign: gtk::Align::Start,
-                                set_wrap: true,
-                                set_xalign: 0.0,
-                                set_selectable: true,
-                            },
+                                set_orientation: model.factors_orientation(),
+                                set_spacing: 18,
+                                set_hexpand: true,
 
-                            gtk::Label {
-                                #[watch]
-                                set_label: &model.product_meta(),
-                                add_css_class: "dim-label",
-                                set_halign: gtk::Align::Start,
-                                set_wrap: true,
-                                set_xalign: 0.0,
-                                set_selectable: true,
+                                // Negatives
+                                gtk::Box {
+                                    set_orientation: gtk::Orientation::Vertical,
+                                    set_spacing: 0,
+                                    set_hexpand: true,
+                                    #[watch]
+                                    set_visible: model.has_negatives(),
+
+                                    gtk::Label {
+                                        set_label: "Negatives",
+                                        add_css_class: "section-title",
+                                        set_halign: gtk::Align::Start,
+                                        set_xalign: 0.0,
+                                        set_margin_bottom: 4,
+                                    },
+
+                                    #[name = "negatives_list"]
+                                    gtk::Box {
+                                        set_orientation: gtk::Orientation::Vertical,
+                                        set_spacing: 0,
+                                        set_hexpand: true,
+                                    },
+                                },
+
+                                // Positives
+                                gtk::Box {
+                                    set_orientation: gtk::Orientation::Vertical,
+                                    set_spacing: 0,
+                                    set_hexpand: true,
+                                    #[watch]
+                                    set_visible: model.has_positives(),
+
+                                    gtk::Label {
+                                        set_label: "Positives",
+                                        add_css_class: "section-title",
+                                        set_halign: gtk::Align::Start,
+                                        set_xalign: 0.0,
+                                        set_margin_bottom: 4,
+                                    },
+
+                                    #[name = "positives_list"]
+                                    gtk::Box {
+                                        set_orientation: gtk::Orientation::Vertical,
+                                        set_spacing: 0,
+                                        set_hexpand: true,
+                                    },
+                                },
                             },
                         },
 
                         gtk::Label {
-                            set_label: "Data from Open Food Facts (openfoodfacts.org). Nutri-Score grades A–E when available.",
+                            set_label: "Scores are Librefood heuristics from Open Food Facts data (not Yuka). Nutri-Score A–E shown when published.",
                             add_css_class: "caption",
                             set_halign: gtk::Align::Start,
                             set_wrap: true,
@@ -379,6 +586,7 @@ impl SimpleComponent for AppModel {
             status_kind: StatusKind::Idle,
             status_text: "Enter a barcode or use the camera.".into(),
             product: None,
+            product_image: None,
             camera_ok: camera::camera_available(),
             scanning: false,
             preview: None,
@@ -393,7 +601,6 @@ impl SimpleComponent for AppModel {
             widgets.barcode_entry.set_text(code);
         }
 
-        // Periodic width poll so layout adapts while resizing.
         {
             let sender_w = sender.clone();
             let win = root.clone();
@@ -403,7 +610,6 @@ impl SimpleComponent for AppModel {
             });
         }
 
-        // Auto-lookup when launched with --barcode.
         if initial.is_some() {
             let sender_l = sender.clone();
             gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
@@ -414,10 +620,15 @@ impl SimpleComponent for AppModel {
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
+    fn update_with_view(
+        &mut self,
+        widgets: &mut Self::Widgets,
+        msg: Self::Input,
+        sender: ComponentSender<Self>,
+        _root: &Self::Root,
+    ) {
         match msg {
             Msg::BarcodeChanged(text) => {
-                // Avoid feedback loop from #[watch] set_text.
                 if text != self.barcode {
                     self.barcode = text;
                 }
@@ -428,27 +639,35 @@ impl SimpleComponent for AppModel {
                     self.status_kind = StatusKind::Error;
                     self.status_text = "Enter a barcode (digits only, e.g. EAN-13).".into();
                     self.product = None;
-                    return;
-                }
-                self.barcode = code.clone();
-                self.status_kind = StatusKind::Loading;
-                self.status_text = format!("Looking up {code}…");
-                self.product = None;
+                    self.product_image = None;
+                    clear_box(&widgets.negatives_list);
+                    clear_box(&widgets.positives_list);
+                } else {
+                    self.barcode = code.clone();
+                    self.status_kind = StatusKind::Loading;
+                    self.status_text = format!("Looking up {code}…");
+                    self.product = None;
+                    self.product_image = None;
+                    clear_box(&widgets.negatives_list);
+                    clear_box(&widgets.positives_list);
 
-                let sender2 = sender.clone();
-                thread::spawn(move || {
-                    let result = off::lookup_product(&code).map_err(format_lookup_err);
-                    sender2.input(Msg::LookupDone(result));
-                });
+                    let sender2 = sender.clone();
+                    thread::spawn(move || {
+                        let result = off::lookup_product(&code).map_err(format_lookup_err);
+                        sender2.input(Msg::LookupDone(result));
+                    });
+                }
             }
             Msg::LookupDone(result) => match result {
                 Ok(info) => {
                     self.status_kind = StatusKind::Success;
-                    self.status_text = if info.nutriscore_grade.is_some() {
-                        "Product found.".into()
-                    } else {
-                        "Product found, but no Nutri-Score is published for this item.".into()
-                    };
+                    self.status_text = format!(
+                        "Product found — Librefood score {}/100 ({}).",
+                        info.score.score, info.score.label
+                    );
+                    self.product_image = texture_from_bytes(info.image_bytes.as_deref());
+                    append_factor_rows(&widgets.negatives_list, &info.score.negatives);
+                    append_factor_rows(&widgets.positives_list, &info.score.positives);
                     self.product = Some(info);
                 }
                 Err(msg) => {
@@ -465,60 +684,65 @@ impl SimpleComponent for AppModel {
                     }
                     self.status_text = msg;
                     self.product = None;
+                    self.product_image = None;
+                    clear_box(&widgets.negatives_list);
+                    clear_box(&widgets.positives_list);
                 }
             },
             Msg::ScanCamera => {
                 if self.scanning {
-                    return;
-                }
-                if !self.camera_ok {
+                    // no-op
+                } else if !self.camera_ok {
                     self.status_kind = StatusKind::Error;
                     self.status_text =
                         "No camera detected. Type or paste a barcode instead.".into();
-                    return;
-                }
-                let stop = Arc::new(AtomicBool::new(false));
-                self.scan_stop = Some(Arc::clone(&stop));
-                self.scanning = true;
-                self.preview = None;
-                self.status_kind = StatusKind::Loading;
-                self.status_text =
-                    "Live preview on — center the barcode in the guide, then hold steady.".into();
-                self.product = None;
+                } else {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    self.scan_stop = Some(Arc::clone(&stop));
+                    self.scanning = true;
+                    self.preview = None;
+                    self.status_kind = StatusKind::Loading;
+                    self.status_text =
+                        "Live preview on — center the barcode in the guide, then hold steady."
+                            .into();
+                    self.product = None;
+                    self.product_image = None;
+                    clear_box(&widgets.negatives_list);
+                    clear_box(&widgets.positives_list);
 
-                let sender2 = sender.clone();
-                thread::spawn(move || {
-                    let result = camera::scan_barcode_live(300, Arc::clone(&stop), |w, h, rgb| {
-                        if !stop.load(Ordering::Relaxed) {
-                            sender2.input(Msg::PreviewFrame {
-                                width: w,
-                                height: h,
-                                rgb,
-                            });
-                        }
-                    })
-                    .map_err(format_camera_err);
-                    sender2.input(Msg::ScanDone(result));
-                });
+                    let sender2 = sender.clone();
+                    thread::spawn(move || {
+                        let result =
+                            camera::scan_barcode_live(300, Arc::clone(&stop), |w, h, rgb| {
+                                if !stop.load(Ordering::Relaxed) {
+                                    sender2.input(Msg::PreviewFrame {
+                                        width: w,
+                                        height: h,
+                                        rgb,
+                                    });
+                                }
+                            })
+                            .map_err(format_camera_err);
+                        sender2.input(Msg::ScanDone(result));
+                    });
+                }
             }
             Msg::PreviewFrame { width, height, rgb } => {
-                if !self.scanning {
-                    return;
+                if self.scanning {
+                    let stride = (width as usize).saturating_mul(3);
+                    let needed = stride.saturating_mul(height as usize);
+                    if width > 0 && height > 0 && stride > 0 && rgb.len() >= needed {
+                        let bytes = gtk::glib::Bytes::from_owned(rgb);
+                        let texture = gdk::MemoryTexture::new(
+                            width as i32,
+                            height as i32,
+                            gdk::MemoryFormat::R8g8b8,
+                            &bytes,
+                            stride,
+                        );
+                        self.preview = Some(texture.upcast());
+                    }
                 }
-                let stride = (width as usize).saturating_mul(3);
-                let needed = stride.saturating_mul(height as usize);
-                if width == 0 || height == 0 || stride == 0 || rgb.len() < needed {
-                    return;
-                }
-                let bytes = gtk::glib::Bytes::from_owned(rgb);
-                let texture = gdk::MemoryTexture::new(
-                    width as i32,
-                    height as i32,
-                    gdk::MemoryFormat::R8g8b8,
-                    &bytes,
-                    stride,
-                );
-                self.preview = Some(texture.upcast());
             }
             Msg::CancelScan => {
                 if let Some(stop) = &self.scan_stop {
@@ -559,7 +783,14 @@ impl SimpleComponent for AppModel {
                 }
             }
         }
+        self.update_view(widgets, sender);
     }
+}
+
+fn texture_from_bytes(bytes: Option<&[u8]>) -> Option<gdk::Texture> {
+    let bytes = bytes?;
+    let gbytes = gtk::glib::Bytes::from_owned(bytes.to_vec());
+    gdk::Texture::from_bytes(&gbytes).ok()
 }
 
 fn format_lookup_err(e: LookupError) -> String {
@@ -603,9 +834,63 @@ fn load_css() {
             color: #1a5c3a;
         }
         .product-name {
-            font-size: 1.25rem;
-            font-weight: 600;
+            font-size: 1.2rem;
+            font-weight: 700;
         }
+        .product-brand {
+            font-size: 0.95rem;
+            opacity: 0.65;
+        }
+        .product-image {
+            border-radius: 10px;
+            min-width: 96px;
+            min-height: 96px;
+            background: alpha(@card_fg_color, 0.06);
+        }
+        .score-number {
+            font-size: 1.75rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+        }
+        .score-label {
+            font-size: 0.95rem;
+            opacity: 0.7;
+        }
+        .score-dot {
+            font-size: 1.6rem;
+            line-height: 1;
+        }
+        .score-dot-good { color: #2e7d32; }
+        .score-dot-mediocre { color: #ef6c00; }
+        .score-dot-poor { color: #c62828; }
+        .section-title {
+            font-size: 1.05rem;
+            font-weight: 700;
+            margin-top: 4px;
+        }
+        .factor-row {
+            padding: 10px 0;
+            border-bottom: 1px solid alpha(@card_fg_color, 0.1);
+        }
+        .factor-title {
+            font-weight: 650;
+        }
+        .factor-detail {
+            font-size: 0.88rem;
+            opacity: 0.65;
+        }
+        .factor-value {
+            font-size: 0.92rem;
+            opacity: 0.7;
+            min-width: 4.5em;
+        }
+        .status-dot {
+            font-size: 0.85rem;
+            min-width: 1.1em;
+        }
+        .dot-good { color: #2e7d32; }
+        .dot-mediocre { color: #ef6c00; }
+        .dot-poor { color: #c62828; }
         .dim-label {
             opacity: 0.75;
         }
@@ -639,19 +924,6 @@ fn load_css() {
             border-radius: 8px;
             background: transparent;
         }
-        .nutri-badge {
-            font-size: 1.35rem;
-            font-weight: 800;
-            padding: 10px 16px;
-            border-radius: 10px;
-            min-width: 140px;
-        }
-        .nutri-a { background: #038141; color: white; }
-        .nutri-b { background: #85bb2f; color: white; }
-        .nutri-c { background: #fecb02; color: #222; }
-        .nutri-d { background: #ee8100; color: white; }
-        .nutri-e { background: #e63e11; color: white; }
-        .nutri-none { background: alpha(@card_fg_color, 0.12); }
         .status-ok { color: #1a5c3a; }
         .status-warn { color: #9a5b00; }
         .status-err { color: #a40000; }

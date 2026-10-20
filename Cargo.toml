@@ -2,7 +2,7 @@
 name = "librefood"
 version = "0.1.0"
 edition = "2021"
-description = "Librefood — scan a barcode, look up Nutri-Score via Open Food Facts"
+description = "Librefood — scan a barcode, look up a detailed product score via Open Food Facts"
 license = "MIT"
 readme = "README.md"
 

@@ -1,6 +1,7 @@
 mod app;
 mod camera;
 mod off;
+mod score;
 
 use app::AppModel;
 use relm4::prelude::*;

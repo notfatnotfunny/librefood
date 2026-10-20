@@ -1,4 +1,5 @@
 mod app;
+mod boycott;
 mod camera;
 mod gst_cam;
 mod engine;

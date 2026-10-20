@@ -23,6 +23,7 @@ const ATTR_CHOICES: &[(&str, &str)] = &[
     (attrs::ORGANIC, "Organic (0/1)"),
     (attrs::ECOSCORE, "Eco-Score (0–100)"),
     (attrs::ALLERGEN_COUNT, "Allergen tag count"),
+    (attrs::BOYCOTT_LISTED, "Boycott list match (0/1)"),
 ];
 
 /// Events emitted by the Profiles page widgets.

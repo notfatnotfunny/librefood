@@ -17,6 +17,8 @@ pub mod attrs {
     pub const ORGANIC: &str = "organic"; // 1.0 / 0.0
     pub const ECOSCORE: &str = "ecoscore_score"; // 0–100 when present
     pub const ALLERGEN_COUNT: &str = "allergen_count";
+    /// 1.0 if brand matched on boycottisraeli.biz, 0.0 if searched with no match.
+    pub const BOYCOTT_LISTED: &str = "boycott_listed";
 }
 
 /// Availability of a single attribute from the data source.

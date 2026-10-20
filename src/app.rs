@@ -2104,7 +2104,7 @@ impl Component for AppModel {
                     clear_lists(widgets);
                     let sender2 = sender.clone();
                     thread::spawn(move || {
-                        let result = off::lookup_product(&code).map_err(format_lookup_err);
+                        let result = crate::app::lookup_product_enriched(&code);
                         sender2.input(Msg::LookupDone(result));
                     });
                 }
@@ -2600,7 +2600,7 @@ impl Component for AppModel {
                         let code2 = self.barcode.clone();
                         let sender2 = sender.clone();
                         thread::spawn(move || {
-                            let result = off::lookup_product(&code2).map_err(format_lookup_err);
+                            let result = crate::app::lookup_product_enriched(&code2);
                             sender2.input(Msg::LookupDone(result));
                         });
                     }
@@ -2698,6 +2698,13 @@ fn texture_from_bytes(bytes: Option<&[u8]>) -> Option<gdk::Texture> {
     let bytes = bytes?;
     let gbytes = gtk::glib::Bytes::from_owned(bytes.to_vec());
     gdk::Texture::from_bytes(&gbytes).ok()
+}
+
+/// OFF lookup plus boycottisraeli.biz brand enrichment (`boycott_listed` attr).
+pub fn lookup_product_enriched(code: &str) -> Result<ProductModel, String> {
+    let mut product = off::lookup_product(code).map_err(format_lookup_err)?;
+    crate::boycott::apply(&mut product);
+    Ok(product)
 }
 
 fn format_lookup_err(e: LookupError) -> String {

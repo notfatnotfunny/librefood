@@ -1,0 +1,49 @@
+{
+  "id": "ethical-consumer",
+  "name": "Ethical consumer",
+  "description": "Checks the product brand against the Boycott Israeli Businesses directory (api.boycottisraeli.biz). Brands matched on that list score poorly. Third-party list — not legal or medical advice.",
+  "version": 1,
+  "builtin": true,
+  "scale": { "kind": "numeric", "min": 0, "max": 100 },
+  "base_score": 70,
+  "missing_data": "unknown",
+  "default_missing_penalty": -5,
+  "labels": [
+    { "min": 75, "label": "Clear", "tone": "good" },
+    { "min": 50, "label": "Unclear", "tone": "mediocre" },
+    { "min": 0, "label": "On boycott list", "tone": "poor" }
+  ],
+  "criteria": [
+    {
+      "id": "boycott-list",
+      "title": "Boycott list (boycottisraeli.biz)",
+      "attribute": "boycott_listed",
+      "weight": 1.0,
+      "polarity": "negative",
+      "missing_policy": "unknown",
+      "rules": [
+        {
+          "when": { "op": "eq", "value": 1 },
+          "adjust": -65,
+          "label": "Brand matched on boycottisraeli.biz",
+          "tone": "poor"
+        },
+        {
+          "when": { "op": "eq", "value": 0 },
+          "adjust": 15,
+          "label": "Brand not found on boycott list",
+          "tone": "good"
+        }
+      ]
+    }
+  ],
+  "caps": [
+    {
+      "attribute": "boycott_listed",
+      "when": { "op": "eq", "value": 1 },
+      "max_score": 25,
+      "label": "Cap when brand is on the boycott list"
+    }
+  ],
+  "category_overrides": []
+}

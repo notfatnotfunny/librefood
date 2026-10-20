@@ -28,6 +28,9 @@ See example files under `data/profiles/`:
 | `minimally-processed.json` | NOVA + additives |
 | `additive-conscious.json` | Additive-first |
 | `environmental-impact.json` | Eco-Score / organic / NOVA |
+| `ethical-consumer.json` | Brand check via [boycottisraeli.biz API](https://boycottisraeli.biz/api) (`boycott_listed` 0/1) |
+
+After an OFF lookup, Librefood searches `https://api.boycottisraeli.biz/v1/search/{brand}` using the product’s brand names and sets attribute `boycott_listed` (`1` = matched company, `0` = no match). The Ethical consumer profile scores from that attribute. The third-party list is not legal advice.
 
 Fields include weighted `criteria`, threshold `rules`, `caps`, `category_overrides`, `missing_data`, and `labels` for named categories on a custom numeric scale.
 

@@ -265,6 +265,7 @@ fn format_value(attribute: &str, v: f64) -> String {
         || attribute == "allergen_count"
         || attribute == "nutriscore_ordinal"
         || attribute == "organic"
+        || attribute == "boycott_listed"
     {
         if (v - v.round()).abs() < 1e-9 {
             return format!("{}", v.round() as i64);

@@ -22,6 +22,10 @@ const BUILTINS: &[(&str, &str)] = &[
         "environmental-impact",
         include_str!("../data/profiles/environmental-impact.json"),
     ),
+    (
+        "ethical-consumer",
+        include_str!("../data/profiles/ethical-consumer.json"),
+    ),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -380,7 +384,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let mut store = ProfileStore::open(dir.clone()).unwrap();
-        assert_eq!(store.list().len(), 4);
+        assert_eq!(store.list().len(), 5);
+        assert!(store.list().iter().any(|p| p.id == "ethical-consumer"));
         assert!(!store.list().iter().any(|p| p.id == "blank"));
         store.set_active("additive-conscious").unwrap();
         assert_eq!(store.active_id(), "additive-conscious");

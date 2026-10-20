@@ -186,17 +186,6 @@ fn brand_queries(product: &ProductModel) -> Vec<String> {
         }
     }
 
-    // Product-name hint: "Cocacola zero sugar" → try leading token if long enough.
-    let name = product.name.trim();
-    if !name.is_empty() {
-        if let Some(tok) = name.split_whitespace().next() {
-            let t = tok.trim_matches(|c: char| !c.is_alphanumeric() && c != '-');
-            if t.chars().count() >= 5 && !is_legal_stop(t) {
-                push_unique(&mut out, t);
-            }
-        }
-    }
-
     out.truncate(6);
     out
 }
@@ -420,6 +409,17 @@ mod tests {
         );
         assert!(!q.iter().any(|x| x.eq_ignore_ascii_case("NV")), "queries={q:?}");
         assert!(!q.iter().any(|x| x.eq_ignore_ascii_case("SA")), "queries={q:?}");
+        assert!(
+            !q.iter().any(|x| x.eq_ignore_ascii_case("Cocacola")),
+            "must not use product-name token: {q:?}"
+        );
+    }
+
+    #[test]
+    fn brand_queries_ignore_product_name_tokens() {
+        let p = product("Barilla", "Pesto Rosso 200g");
+        let q = brand_queries(&p);
+        assert_eq!(q, vec!["Barilla".to_string()], "queries={q:?}");
     }
 
     #[test]

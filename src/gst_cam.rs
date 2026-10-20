@@ -573,15 +573,24 @@ pub fn resolve_libcamera_name() -> Option<String> {
 
     if let Some(saved) = load_saved_camera_id() {
         if let Some(c) = cams.iter().find(|c| c.id == saved) {
+            // Don't reopen a saved Front when the user wants Back by default.
+            if c.facing.matches(pref) || pref == CameraFacingPref::Any {
+                cam_debug(format!(
+                    "selected saved id={:?} facing={} label={:?}",
+                    c.id,
+                    c.facing.label(),
+                    friendly_label(c.facing, &c.id, &c.display)
+                ));
+                return Some(c.id.clone());
+            }
             cam_debug(format!(
-                "selected saved id={:?} facing={} label={:?}",
+                "saved id={:?} facing={} mismatches pref={pref:?}; ignoring saved",
                 c.id,
-                c.facing.label(),
-                friendly_label(c.facing, &c.id, &c.display)
+                c.facing.label()
             ));
-            return Some(c.id.clone());
+        } else {
+            cam_debug(format!("saved camera-id {saved:?} not in list; ignoring"));
         }
-        cam_debug(format!("saved camera-id {saved:?} not in list; ignoring"));
     }
 
     let chosen = pool.first().copied()?;
@@ -616,11 +625,24 @@ fn build_pipeline(
             .map(|s| s.to_string())
             .or_else(resolve_libcamera_name);
         if let Some(name) = name {
-            if let Some(el) = pipeline.by_name("cam") {
-                el.set_property_from_str("camera-name", &name);
-                cam_debug(format!("set libcamerasrc camera-name={name}"));
-                applied = Some(name);
+            let el = pipeline
+                .by_name("cam")
+                .ok_or_else(|| "libcamerasrc element missing".to_string())?;
+            el.set_property_from_str("camera-name", &name);
+            // Read back — property must stick before PLAYING (MUTABLE_READY).
+            let got: String = el.property("camera-name");
+            cam_debug(format!(
+                "set libcamerasrc camera-name want={name:?} got={got:?}"
+            ));
+            if !got.is_empty() && got != name {
+                let _ = pipeline.set_state(gst::State::Null);
+                return Err(format!(
+                    "camera-name not applied (want {name:?}, got {got:?})"
+                ));
             }
+            applied = Some(name);
+        } else if camera_name.is_some() {
+            return Err("could not resolve camera-name for libcamerasrc".into());
         }
     }
 
@@ -660,6 +682,11 @@ impl GstCamera {
         }
         let mut last = String::new();
         for src in sources {
+            // When an explicit camera id is requested, only libcamerasrc can honor it.
+            // Falling through to pipewiresrc would keep the old portal stream (front).
+            if camera_name.is_some() && !matches!(src, GstSource::LibCamera) {
+                continue;
+            }
             match Self::open_source(src, camera_name) {
                 Ok(cam) => {
                     cam_debug(format!(
@@ -678,8 +705,39 @@ impl GstCamera {
         Err(last)
     }
 
+    /// Open **only** `libcamerasrc` with the given id (used for mid-scan switch).
+    pub fn open_libcamera_named(camera_name: &str) -> Result<Self, String> {
+        ensure_gst()?;
+        if !element_available("libcamerasrc") {
+            return Err("libcamerasrc not available".into());
+        }
+        cam_debug(format!("open_libcamera_named({camera_name:?})"));
+        Self::open_source(GstSource::LibCamera, Some(camera_name))
+    }
+
+    /// Stop the pipeline and wait until it is fully released (needed before CAMSS reopen).
+    pub fn shutdown(self) {
+        let name = self.camera_name.clone();
+        cam_debug(format!("shutdown pipeline name={name:?}"));
+        let _ = self.pipeline.set_state(gst::State::Null);
+        let (res, state, _) = self.pipeline.state(gst::ClockTime::from_seconds(3));
+        cam_debug(format!(
+            "shutdown done name={name:?} state={state:?} res={res:?}"
+        ));
+        // Drop: second Null + short wait is harmless once already Null; must not
+        // mem::forget — a leaked PLAYING/Null pipeline can keep the sensor busy.
+    }
+
     fn open_source(src: GstSource, camera_name: Option<&str>) -> Result<Self, String> {
         let (pipeline, sink, applied) = build_pipeline(src, camera_name)?;
+        if let Some(want) = camera_name {
+            if applied.as_deref() != Some(want) {
+                let _ = pipeline.set_state(gst::State::Null);
+                return Err(format!(
+                    "libcamerasrc camera-name mismatch (want {want:?}, applied {applied:?})"
+                ));
+            }
+        }
         pipeline
             .set_state(gst::State::Playing)
             .map_err(|e| format!("set Playing: {e}"))?;
@@ -699,8 +757,14 @@ impl GstCamera {
             camera_name: applied,
         };
         match cam.next_rgb(gst::ClockTime::from_seconds(5)) {
-            Ok(_) => {
-                cam_debug(format!("gst first frame OK ({})", src.label()));
+            Ok((w, h, _)) => {
+                cam_debug(format!(
+                    "gst first frame OK ({}) name={:?} {}x{}",
+                    src.label(),
+                    cam.camera_name,
+                    w,
+                    h
+                ));
                 if let Some(id) = cam.camera_name.as_deref() {
                     save_camera_id(id);
                 }
@@ -708,6 +772,7 @@ impl GstCamera {
             }
             Err(e) => {
                 let _ = cam.pipeline.set_state(gst::State::Null);
+                let _ = cam.pipeline.state(gst::ClockTime::from_seconds(2));
                 Err(e)
             }
         }
@@ -771,6 +836,7 @@ impl GstCamera {
 impl Drop for GstCamera {
     fn drop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
+        let _ = self.pipeline.state(gst::ClockTime::from_seconds(2));
     }
 }
 

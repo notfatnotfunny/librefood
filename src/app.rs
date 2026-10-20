@@ -2085,8 +2085,10 @@ impl Component for AppModel {
             }
             Msg::PreviewFrame { width, height, rgb } => {
                 if self.scanning {
+                    let mut switching = false;
                     if let Some(ctrl) = &self.scan_control {
                         self.scan_can_switch = ctrl.can_switch.load(Ordering::Relaxed);
+                        switching = ctrl.switching.load(Ordering::Relaxed);
                         if let Ok(label) = ctrl.label.lock() {
                             if !label.is_empty() && *label != self.scan_camera_label {
                                 self.scan_camera_label = label.clone();
@@ -2106,7 +2108,10 @@ impl Component for AppModel {
                             stride,
                         );
                         self.preview = Some(texture.upcast());
-                        if first {
+                        // Clear "Switching…" once the new pipeline delivers a frame
+                        // (or refresh label on first open).
+                        let was_switching = self.status_text.starts_with("Switching camera");
+                        if first || (was_switching && !switching) {
                             let cam = if self.scan_camera_label.is_empty() {
                                 String::new()
                             } else {
@@ -2121,8 +2126,12 @@ impl Component for AppModel {
             }
             Msg::SwitchCamera => {
                 if let Some(ctrl) = &self.scan_control {
-                    ctrl.request_cycle();
-                    self.status_text = "Switching camera…".into();
+                    if ctrl.can_switch.load(Ordering::Relaxed)
+                        && !ctrl.switching.load(Ordering::Relaxed)
+                    {
+                        ctrl.request_cycle();
+                        self.status_text = "Switching camera…".into();
+                    }
                 }
             }
             Msg::CancelScan => {

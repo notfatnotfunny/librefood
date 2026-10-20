@@ -191,6 +191,26 @@ impl ProfileStore {
         Ok(copy)
     }
 
+    /// Create a new blank custom profile (saved under the config profiles dir).
+    pub fn create_new(&mut self, name: &str) -> Result<ScoringProfile, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("profile name is empty".into());
+        }
+        let new_id = unique_id(&slugify(name), &self.profiles);
+        let mut profile = blank_profile_template();
+        profile.id = new_id;
+        profile.name = name.to_string();
+        profile.builtin = false;
+        profile.version = 1;
+        profile.description =
+            "Custom profile created in Librefood. Edit weights and rules to suit your goals."
+                .into();
+        self.save(profile.clone())?;
+        self.set_active(&profile.id)?;
+        Ok(profile)
+    }
+
     pub fn import_json(&mut self, text: &str) -> Result<ScoringProfile, String> {
         let mut p: ScoringProfile = serde_json::from_str(text).map_err(|e| e.to_string())?;
         p.builtin = false;
@@ -290,6 +310,72 @@ fn chrono_like_suffix() -> u64 {
         .unwrap_or(0)
 }
 
+fn blank_profile_template() -> ScoringProfile {
+    use crate::engine::{
+        Criterion, FactorPolarity, MissingDataPolicy, ScoreLabelBand, ScoreScale, ThresholdRule,
+        Tone, When,
+    };
+    use crate::product::attrs;
+    ScoringProfile {
+        id: "new".into(),
+        name: "New profile".into(),
+        description: String::new(),
+        version: 1,
+        scale: ScoreScale::default(),
+        base_score: 50.0,
+        missing_data: MissingDataPolicy::Ignore,
+        default_missing_penalty: -5.0,
+        labels: vec![
+            ScoreLabelBand {
+                min: 75.0,
+                label: "Excellent".into(),
+                tone: Tone::Good,
+            },
+            ScoreLabelBand {
+                min: 55.0,
+                label: "Good".into(),
+                tone: Tone::Good,
+            },
+            ScoreLabelBand {
+                min: 30.0,
+                label: "Mediocre".into(),
+                tone: Tone::Mediocre,
+            },
+            ScoreLabelBand {
+                min: 0.0,
+                label: "Poor".into(),
+                tone: Tone::Poor,
+            },
+        ],
+        criteria: vec![Criterion {
+            id: "sugars".into(),
+            title: "Sugars".into(),
+            attribute: attrs::SUGARS_100G.into(),
+            weight: 1.0,
+            polarity: FactorPolarity::Negative,
+            rules: vec![
+                ThresholdRule {
+                    when: When::Lte { value: 5.0 },
+                    adjust: 5.0,
+                    label: "Low sugar".into(),
+                    tone: Tone::Good,
+                },
+                ThresholdRule {
+                    when: When::Gt { value: 5.0 },
+                    adjust: -5.0,
+                    label: "Higher sugar".into(),
+                    tone: Tone::Mediocre,
+                },
+            ],
+            missing_policy: None,
+            missing_penalty: None,
+        }],
+        caps: vec![],
+        category_overrides: vec![],
+        builtin: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +401,13 @@ mod tests {
             .import_json(&exported.replace(&dup.id, "imported-x"))
             .unwrap();
         assert_eq!(imported.id, "imported-x");
+
+        let created = store.create_new("Kitchen Rules").unwrap();
+        assert!(!created.builtin);
+        assert_eq!(created.name, "Kitchen Rules");
+        assert_eq!(store.active_id(), created.id);
+        assert!(dir.join(format!("{}.json", created.id)).exists());
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -124,6 +124,8 @@ pub fn run_manage_dialog(
     let btn_row = gtk::FlowBox::new();
     btn_row.set_max_children_per_line(4);
     btn_row.set_selection_mode(gtk::SelectionMode::None);
+    let btn_new = gtk::Button::with_label("New profile…");
+    btn_new.add_css_class("suggested-action");
     let btn_active = gtk::Button::with_label("Set active");
     let btn_dup = gtk::Button::with_label("Duplicate");
     let btn_edit = gtk::Button::with_label("Edit…");
@@ -131,8 +133,8 @@ pub fn run_manage_dialog(
     let btn_import = gtk::Button::with_label("Import JSON");
     let btn_delete = gtk::Button::with_label("Delete override");
     let btn_close = gtk::Button::with_label("Close");
-    btn_close.add_css_class("suggested-action");
     for b in [
+        &btn_new,
         &btn_active,
         &btn_dup,
         &btn_edit,
@@ -156,6 +158,50 @@ pub fn run_manage_dialog(
     // Safety: dialog is modal and store lives for the dialog lifetime on the same thread.
     let store_ptr = store as *mut ProfileStore;
 
+    {
+        let refresh = refresh.clone();
+        let status = status.clone();
+        let changed = Rc::clone(&changed);
+        let dialog = dialog.clone();
+        btn_new.connect_clicked(move |_| {
+            let store = unsafe { &mut *store_ptr };
+            let Some(name) = ask_text_dialog(
+                &dialog,
+                "New scoring profile",
+                "Name",
+                "My scoring profile",
+            ) else {
+                return;
+            };
+            match store.create_new(&name) {
+                Ok(created) => {
+                    changed.set(true);
+                    // Offer immediate edit of weights / thresholds.
+                    let to_edit = store.get(&created.id).cloned().unwrap_or(created.clone());
+                    if let Some(edited) = edit_profile_dialog(&dialog, to_edit) {
+                        match store.save(edited) {
+                            Ok(()) => status.set_text(&format!(
+                                "Created and saved “{}” ({}).",
+                                name, created.id
+                            )),
+                            Err(e) => status.set_text(&format!(
+                                "Created {}, but save after edit failed: {e}",
+                                created.id
+                            )),
+                        }
+                    } else {
+                        status.set_text(&format!(
+                            "Created “{}” ({}) — saved under ~/.config/librefood/profiles/",
+                            name, created.id
+                        ));
+                    }
+                    let _ = store.set_active(&created.id);
+                    refresh(store);
+                }
+                Err(e) => status.set_text(&e),
+            }
+        });
+    }
     {
         let refresh = refresh.clone();
         let selected_id = selected_id.clone();
@@ -357,6 +403,91 @@ pub fn run_manage_dialog(
         active_id: store.active_id().to_string(),
         store_changed: changed.get(),
     }
+}
+
+fn ask_text_dialog(
+    parent: &impl IsA<gtk::Window>,
+    title: &str,
+    label: &str,
+    initial: &str,
+) -> Option<String> {
+    let dialog = gtk::Window::builder()
+        .title(title)
+        .transient_for(parent)
+        .modal(true)
+        .default_width(400)
+        .build();
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    box_.set_margin_top(14);
+    box_.set_margin_bottom(14);
+    box_.set_margin_start(14);
+    box_.set_margin_end(14);
+    box_.append(&gtk::Label::new(Some(label)));
+    let entry = gtk::Entry::builder()
+        .text(initial)
+        .hexpand(true)
+        .activates_default(true)
+        .build();
+    box_.append(&entry);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let ok = gtk::Button::with_label("Create");
+    ok.add_css_class("suggested-action");
+    let cancel = gtk::Button::with_label("Cancel");
+    row.append(&ok);
+    row.append(&cancel);
+    box_.append(&row);
+    dialog.set_child(Some(&box_));
+
+    let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+    ok.connect_clicked({
+        let dialog = dialog.clone();
+        let entry = entry.clone();
+        let tx = tx.clone();
+        move |_| {
+            let text = entry.text().trim().to_string();
+            let _ = tx.send(if text.is_empty() { None } else { Some(text) });
+            dialog.close();
+        }
+    });
+    entry.connect_activate({
+        let dialog = dialog.clone();
+        let entry = entry.clone();
+        let tx = tx.clone();
+        move |_| {
+            let text = entry.text().trim().to_string();
+            let _ = tx.send(if text.is_empty() { None } else { Some(text) });
+            dialog.close();
+        }
+    });
+    cancel.connect_clicked({
+        let dialog = dialog.clone();
+        let tx = tx.clone();
+        move |_| {
+            let _ = tx.send(None);
+            dialog.close();
+        }
+    });
+    dialog.connect_close_request({
+        let tx = tx.clone();
+        move |_| {
+            let _ = tx.send(None);
+            gtk::glib::Propagation::Proceed
+        }
+    });
+
+    dialog.present();
+    entry.grab_focus();
+    let mut result = None;
+    loop {
+        if let Ok(v) = rx.try_recv() {
+            result = v;
+            break;
+        }
+        while gtk::glib::MainContext::default().iteration(false) {}
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    dialog.destroy();
+    result
 }
 
 fn edit_profile_dialog(

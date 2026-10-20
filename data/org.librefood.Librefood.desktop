@@ -10,3 +10,5 @@ Categories=Utility;
 Keywords=food;barcode;nutri-score;openfoodfacts;nutrition;scoring;
 StartupNotify=true
 DBusActivatable=false
+# Fractal/Snapshot: tell Phosh / mobile shells this app is phone-capable.
+X-Purism-FormFactor=Workstation;Mobile;

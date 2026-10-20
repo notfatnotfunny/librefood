@@ -70,7 +70,8 @@ enum UiWidth {
 
 impl UiWidth {
     fn from_px(w: i32) -> Self {
-        if w < 520 {
+        // Fractal collapses its split view at max-width: 600sp.
+        if w < 600 {
             Self::Compact
         } else if w < 900 {
             Self::Medium
@@ -859,11 +860,12 @@ impl Component for AppModel {
         #[root]
         adw::ApplicationWindow {
             set_title: Some("Librefood"),
-            // Defaults overridden in init — always clamped to the monitor.
-            set_default_width: 360,
-            set_default_height: 480,
-            set_width_request: 320,
-            set_height_request: 280,
+            // Snapshot-like soft defaults; apply_window_placement clamps to the monitor.
+            set_default_width: 800,
+            set_default_height: 640,
+            // Fractal minimums (width-request: 360, height-request: 294).
+            set_width_request: 360,
+            set_height_request: 294,
 
             #[wrap(Some)]
             set_content = &gtk::Box {
@@ -1608,8 +1610,8 @@ impl Component for AppModel {
         load_css();
         logo::apply_window_icon(&root);
         apply_window_placement(&root);
-        // Wayland/Phosh often ignore fullscreen/maximize until the surface is
-        // mapped — re-apply on map and once shortly after.
+        // Wayland/Phosh often ignore maximize until the surface is mapped —
+        // re-apply on map and once shortly after (same as before).
         {
             let win = root.clone();
             win.connect_map(|w| {
@@ -2181,9 +2183,8 @@ fn is_mobile_desktop_env() -> bool {
 
 /// Handheld / phone-class display (e.g. OnePlus fajita 1920×1080 @ 16:9).
 ///
-/// Previous logic required area < 1.4M or edge ≤900/700, so **1080p phones
-/// only got maximize** plus `set_default_size(mon_w, mon_h)` — too wide on
-/// Phosh. Prefer true fullscreen for Phosh and single ≤1080 short-edge panels.
+/// Used only to decide maximize-on-launch. Fractal/Snapshot do **not** detect
+/// phones for fullscreen; Phosh fills the workarea when the window is maximized.
 fn is_handheld_display(mon_w: i32, mon_h: i32, scale: i32, n_monitors: u32) -> bool {
     let short = mon_w.min(mon_h);
     let long = mon_w.max(mon_h);
@@ -2196,9 +2197,7 @@ fn is_handheld_display(mon_w: i32, mon_h: i32, scale: i32, n_monitors: u32) -> b
         return true;
     }
     // 1080p-class single panel (fajita landscape 1920×1080 or portrait 1080×1920).
-    // Hi-dpi phones usually report scale≥2; some Alpine stacks report 1 with
-    // physical geometry — still treat single ≤1080 short edge as handheld.
-    // Desktop 1080p users: set LIBREFOOD_NO_FULLSCREEN=1.
+    // Desktop 1080p users: set LIBREFOOD_NO_FULLSCREEN=1 to keep a floating window.
     if single && short <= 1080 && long <= 2400 {
         return true;
     }
@@ -2208,16 +2207,34 @@ fn is_handheld_display(mon_w: i32, mon_h: i32, scale: i32, n_monitors: u32) -> b
     false
 }
 
-/// Place the window fully inside the current monitor.
+/// Soft default size inside the monitor (never ≥ display geom).
 ///
-/// Handheld → true fullscreen (Snapshot-style). Desktop → maximize.
-/// Default size is always clamped **below** the monitor so a failed
-/// fullscreen/maximize never leaves an oversized window.
+/// Snapshot ships 800×640; Fractal UI uses 900×850. We prefer Snapshot’s
+/// smaller default so ultrawide/short phones never open “too wide/tall”
+/// before maximize applies.
+fn clamp_default_size(mon_w: i32, mon_h: i32, prefer_w: i32, prefer_h: i32) -> (i32, i32) {
+    let max_w = ((mon_w as f64) * 0.92).round() as i32;
+    let max_h = ((mon_h as f64) * 0.92).round() as i32;
+    let min_w = 360.min(mon_w).max(1);
+    let min_h = 294.min(mon_h).max(1);
+    let w = prefer_w.clamp(min_w, max_w.max(min_w)).min(mon_w);
+    let h = prefer_h.clamp(min_h, max_h.max(min_h)).min(mon_h);
+    (w, h)
+}
+
+/// Place the window inside the current monitor (Fractal/Snapshot patterns).
 ///
-/// Escape: `LIBREFOOD_NO_FULLSCREEN=1`. Tests: `LIBREFOOD_WIDTH`/`HEIGHT`.
+/// * **Mobile / Phosh / small single panel:** `maximize()` into the workarea
+///   (Snapshot restores maximized; neither Fractal nor Snapshot auto-fullscreen
+///   on launch).
+/// * **Desktop:** floating default ~800×640, resizable — no forced maximize.
+/// * Defaults always clamped **below** monitor size so a delayed maximize never
+///   leaves an oversized floating window.
+///
+/// Escape: `LIBREFOOD_NO_FULLSCREEN=1` skips maximize. Tests: `LIBREFOOD_WIDTH`/`HEIGHT`.
 fn apply_window_placement(win: &adw::ApplicationWindow) {
     let Some(display) = gdk::Display::default() else {
-        win.set_default_size(360, 480);
+        win.set_default_size(800, 640);
         return;
     };
 
@@ -2233,42 +2250,41 @@ fn apply_window_placement(win: &adw::ApplicationWindow) {
         });
 
     let Some(monitor) = monitor else {
-        win.set_default_size(360, 480);
+        win.set_default_size(800, 640);
         return;
     };
 
     let geom = monitor.geometry();
     let scale = monitor.scale_factor().max(1);
     // GDK geometry is in application pixels — never request larger.
-    let mon_w = geom.width().max(320);
-    let mon_h = geom.height().max(280);
+    let mon_w = geom.width().max(360);
+    let mon_h = geom.height().max(294);
 
     if let (Ok(w), Ok(h)) = (
         std::env::var("LIBREFOOD_WIDTH"),
         std::env::var("LIBREFOOD_HEIGHT"),
     ) {
         if let (Ok(w), Ok(h)) = (w.parse::<i32>(), h.parse::<i32>()) {
-            win.set_default_size(w.clamp(320, mon_w), h.clamp(280, mon_h));
+            let (cw, ch) = clamp_default_size(mon_w, mon_h, w, h);
+            win.set_default_size(cw, ch);
             return;
         }
     }
 
     let handheld = is_handheld_display(mon_w, mon_h, scale, n_monitors);
 
-    // Soft default *inside* the monitor — do NOT set default to full geom
-    // (that was the “too wide” bug when maximize/fullscreen lagged).
-    let def_w = if handheld {
-        mon_w.min(720).max(360.min(mon_w))
+    // Snapshot defaults (800×640). On very short landscape phones, prefer a
+    // portrait-ish fallback so a failed maximize is still usable.
+    let (prefer_w, prefer_h) = if handheld && mon_h < mon_w && mon_h <= 700 {
+        (360.min(mon_w), mon_h.min(640))
+    } else if handheld {
+        (mon_w.min(800), mon_h.min(640))
     } else {
-        520.min(mon_w).max(360.min(mon_w))
+        (800, 640)
     };
-    let def_h = if handheld {
-        mon_h.min(1280).max(400.min(mon_h))
-    } else {
-        780.min(mon_h).max(400.min(mon_h))
-    };
-    win.set_default_size(def_w.min(mon_w), def_h.min(mon_h));
-    win.set_size_request(320.min(mon_w), 280.min(mon_h));
+    let (def_w, def_h) = clamp_default_size(mon_w, mon_h, prefer_w, prefer_h);
+    win.set_default_size(def_w, def_h);
+    win.set_size_request(360.min(mon_w), 294.min(mon_h));
 
     let no_fs = matches!(
         std::env::var("LIBREFOOD_NO_FULLSCREEN").as_deref(),
@@ -2279,11 +2295,11 @@ fn apply_window_placement(win: &adw::ApplicationWindow) {
     }
 
     if handheld {
-        // Snapshot-like: fill the display completely on phones.
-        win.fullscreen_on_monitor(&monitor);
-    } else {
+        // Phosh / mobile: fill the shell workarea (panel stays). True
+        // fullscreen is opt-in elsewhere; Fractal/Snapshot do not launch FS.
         win.maximize();
     }
+    // Desktop: leave floating at the soft default — resizable, not forced FS.
 }
 
 /// Best-effort xdg-desktop-portal Camera presence check (Snapshot uses portal
@@ -2471,7 +2487,7 @@ fn load_css() {
 
 #[cfg(test)]
 mod window_placement_tests {
-    use super::is_handheld_display;
+    use super::{clamp_default_size, is_handheld_display};
 
     #[test]
     fn fajita_1080p_16x9_is_handheld() {
@@ -2487,5 +2503,18 @@ mod window_placement_tests {
     fn large_desktop_not_handheld_by_size_alone() {
         assert!(!is_handheld_display(2560, 1440, 1, 1));
         assert!(!is_handheld_display(3840, 2160, 1, 2));
+    }
+
+    #[test]
+    fn clamp_default_stays_inside_monitor() {
+        let (w, h) = clamp_default_size(1920, 1080, 800, 640);
+        assert!(w <= 1920 && h <= 1080);
+        assert!(w <= ((1920.0 * 0.92) as i32) + 1);
+        assert!(h <= ((1080.0 * 0.92) as i32) + 1);
+        // Never request larger than the display even if prefer is huge.
+        let (w2, h2) = clamp_default_size(800, 480, 2000, 2000);
+        assert!(w2 <= 800 && h2 <= 480);
+        assert!(w2 >= 360.min(800));
+        assert!(h2 >= 294.min(480));
     }
 }

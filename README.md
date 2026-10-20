@@ -86,7 +86,7 @@ sudo pacman -S libcamera gst-plugin-libcamera pipewire
 
 Optional portal packages (permission dialog for PipeWire path): `xdg-desktop-portal`, pipewire.
 
-Typed barcodes always work. On phones (Phosh / ≤1080p short edge, e.g. fajita 1920×1080) the window opens **fullscreen**; desktops maximize. Escape: `LIBREFOOD_NO_FULLSCREEN=1`.
+Typed barcodes always work. Window placement follows Fractal/Snapshot patterns: phones (Phosh / ≤1080p short edge, e.g. fajita) **maximize** into the shell workarea; desktops open a floating ~800×640 window (resizable). Escape force-maximize: `LIBREFOOD_NO_FULLSCREEN=1`.
 
 ## License
 

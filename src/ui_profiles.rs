@@ -247,10 +247,9 @@ pub fn rebuild_profile_actions(actions: &gtk::Box, emit: &Rc<dyn Fn(ProfilePageE
         btn.set_halign(gtk::Align::Fill);
         if let Some(child) = btn.child() {
             if let Ok(lab) = child.downcast::<gtk::Label>() {
-                lab.set_halign(gtk::Align::Start);
-                lab.set_xalign(0.0);
-                lab.set_margin_start(14);
-                lab.set_margin_end(14);
+                lab.set_halign(gtk::Align::Center);
+                lab.set_xalign(0.5);
+                lab.set_justify(gtk::Justification::Center);
             }
         }
         for c in classes {

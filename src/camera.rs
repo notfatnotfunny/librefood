@@ -1,9 +1,9 @@
 //! Webcam barcode scanning via raw V4L2 (`v4l` crate) + rxing.
 //!
-//! Alpine/ARM stacks often make nokhwa fail with
-//! `CameraFormat: Failed to Fulfill` even on capture-capable nodes. We open
-//! devices ourselves: QUERYCAP → ENUM_FMT → S_FMT → MMAP stream, decode
-//! MJPEG/YUYV to RGB, then barcode-detect.
+//! Supports single-planar (USB UVC / MJPEG) and **multiplanar** capture
+//! (Qualcomm CAMSS on phones like OnePlus fajita: `Video Capture Multiplanar`
+//! with UYVY/YUYV). Flow: QUERYCAP → ENUM_FMT (capture + mplane) → S_FMT →
+//! MMAP → RGB → barcode decode.
 //!
 //! Override: `LIBREFOOD_CAMERA_DEVICE=/dev/video0`
 //! Debug: `LIBREFOOD_CAMERA_DEBUG=1`
@@ -18,11 +18,15 @@ use std::time::Duration;
 use thiserror::Error;
 use v4l::buffer::Type as BufType;
 use v4l::capability::Flags as CapFlags;
-use v4l::io::traits::CaptureStream;
+use v4l::framesize::FrameSizeEnum;
 use v4l::prelude::*;
+use v4l::v4l2;
+use v4l::v4l_sys::{
+    v4l2_buffer, v4l2_buffer__bindgen_ty_1, v4l2_fmtdesc, v4l2_format, v4l2_pix_format_mplane,
+    v4l2_plane, v4l2_requestbuffers,
+};
 use v4l::video::Capture;
 use v4l::{Format, FourCC};
-use v4l::framesize::FrameSizeEnum;
 
 #[derive(Debug, Error)]
 pub enum CameraError {
@@ -94,6 +98,10 @@ impl CameraProbe {
 enum PixelKind {
     Mjpeg,
     Yuyv,
+    Uyvy,
+    Vyuy,
+    Yvyu,
+    Grey,
 }
 
 fn camera_debug_enabled() -> bool {
@@ -254,6 +262,12 @@ fn is_v4l2_capture_node(path: &Path) -> bool {
         cam_debug(format!("skip {}: QUERYCAP failed", path.display()));
         return false;
     };
+    let card_l = caps.card.to_ascii_lowercase();
+    // Skip codec nodes (Venus encode/decode) — not cameras.
+    if card_l.contains("venus") || card_l.contains("encoder") || card_l.contains("decoder") {
+        cam_debug(format!("skip {}: codec card \"{}\"", path.display(), caps.card));
+        return false;
+    }
     let f = caps.capabilities;
     let capture = f.contains(CapFlags::VIDEO_CAPTURE) || f.contains(CapFlags::VIDEO_CAPTURE_MPLANE);
     let meta = f.contains(CapFlags::META_CAPTURE);
@@ -297,21 +311,53 @@ fn candidate_paths() -> Vec<PathBuf> {
     list_capture_video_nodes()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaneMode {
+    /// V4L2_BUF_TYPE_VIDEO_CAPTURE
+    Single,
+    /// V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE (Qualcomm CAMSS, etc.)
+    Mplane,
+}
+
+impl PlaneMode {
+    fn buf_type(self) -> BufType {
+        match self {
+            Self::Single => BufType::VideoCapture,
+            Self::Mplane => BufType::VideoCaptureMplane,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct NegotiatedFormat {
     width: u32,
     height: u32,
     kind: PixelKind,
+    mode: PlaneMode,
 }
 
 fn fourcc_kind(fourcc: FourCC) -> Option<PixelKind> {
-    if fourcc == FourCC::new(b"MJPG") || fourcc == FourCC::new(b"JPEG") {
-        Some(PixelKind::Mjpeg)
-    } else if fourcc == FourCC::new(b"YUYV") {
-        Some(PixelKind::Yuyv)
-    } else {
-        None
+    match &fourcc.repr {
+        b"MJPG" | b"JPEG" => Some(PixelKind::Mjpeg),
+        b"YUYV" => Some(PixelKind::Yuyv),
+        b"UYVY" => Some(PixelKind::Uyvy),
+        b"VYUY" => Some(PixelKind::Vyuy),
+        b"YVYU" => Some(PixelKind::Yvyu),
+        b"GREY" | b"Y800" => Some(PixelKind::Grey),
+        _ => None,
     }
+}
+
+fn preferred_fourccs() -> [FourCC; 7] {
+    [
+        FourCC::new(b"MJPG"),
+        FourCC::new(b"JPEG"),
+        FourCC::new(b"YUYV"),
+        FourCC::new(b"UYVY"),
+        FourCC::new(b"VYUY"),
+        FourCC::new(b"YVYU"),
+        FourCC::new(b"GREY"),
+    ]
 }
 
 fn pick_resolution(dev: &Device, fourcc: FourCC) -> (u32, u32) {
@@ -321,20 +367,17 @@ fn pick_resolution(dev: &Device, fourcc: FourCC) -> (u32, u32) {
     };
     let mut best: Option<(u32, u32, u64)> = None;
     for fs in sizes {
-        let discrete: Vec<(u32, u32)> = match fs.size {
+        let candidates: Vec<(u32, u32)> = match fs.size {
             FrameSizeEnum::Discrete(d) => vec![(d.width, d.height)],
             FrameSizeEnum::Stepwise(s) => {
-                // Prefer mid-ish size within stepwise range.
-                vec![
-                    (s.min_width.max(320).min(s.max_width), s.min_height.max(240).min(s.max_height)),
-                    (
-                        ((s.min_width + s.max_width) / 2).max(s.min_width),
-                        ((s.min_height + s.max_height) / 2).max(s.min_height),
-                    ),
-                ]
+                // Continuous/stepwise (CAMSS: 1x1–8191x8191): clamp target into range.
+                let w = target.0.clamp(s.min_width.max(1), s.max_width.max(1));
+                let h = target.1.clamp(s.min_height.max(1), s.max_height.max(1));
+                // Keep even dims for packed YUV.
+                vec![(w & !1, h & !1), (w, h)]
             }
         };
-        for (w, h) in discrete {
+        for (w, h) in candidates {
             if w == 0 || h == 0 {
                 continue;
             }
@@ -350,61 +393,451 @@ fn pick_resolution(dev: &Device, fourcc: FourCC) -> (u32, u32) {
     best.map(|(w, h, _)| (w, h)).unwrap_or(target)
 }
 
+fn enum_formats_for(dev: &Device, mode: PlaneMode) -> Result<Vec<FourCC>, String> {
+    let mut out = Vec::new();
+    let mut desc = unsafe {
+        std::mem::zeroed::<v4l2_fmtdesc>()
+    };
+    desc.type_ = mode.buf_type() as u32;
+    desc.index = 0;
+    loop {
+        let ret = unsafe {
+            v4l2::ioctl(
+                dev.handle().fd(),
+                v4l2::vidioc::VIDIOC_ENUM_FMT,
+                &mut desc as *mut _ as *mut std::os::raw::c_void,
+            )
+        };
+        match ret {
+            Ok(()) => {
+                out.push(FourCC::from(desc.pixelformat));
+                desc.index += 1;
+                desc.description = unsafe { std::mem::zeroed() };
+            }
+            Err(_) if desc.index == 0 => return Ok(Vec::new()),
+            Err(_) => break,
+        }
+    }
+    Ok(out)
+}
+
+fn set_format_for(
+    dev: &Device,
+    mode: PlaneMode,
+    width: u32,
+    height: u32,
+    fourcc: FourCC,
+) -> Result<(u32, u32, FourCC), String> {
+    match mode {
+        PlaneMode::Single => {
+            let actual = dev
+                .set_format(&Format::new(width, height, fourcc))
+                .map_err(|e| format!("S_FMT: {e}"))?;
+            Ok((actual.width, actual.height, actual.fourcc))
+        }
+        PlaneMode::Mplane => {
+            let mut fmt = unsafe { std::mem::zeroed::<v4l2_format>() };
+            fmt.type_ = BufType::VideoCaptureMplane as u32;
+            unsafe {
+                fmt.fmt.pix_mp = v4l2_pix_format_mplane {
+                    width,
+                    height,
+                    pixelformat: u32::from(fourcc),
+                    field: 1, // NONE / progressive
+                    colorspace: 0,
+                    plane_fmt: std::mem::zeroed(),
+                    num_planes: 1,
+                    flags: 0,
+                    __bindgen_anon_1: std::mem::zeroed(),
+                    quantization: 0,
+                    xfer_func: 0,
+                    reserved: [0; 7],
+                };
+            }
+            unsafe {
+                v4l2::ioctl(
+                    dev.handle().fd(),
+                    v4l2::vidioc::VIDIOC_S_FMT,
+                    &mut fmt as *mut _ as *mut std::os::raw::c_void,
+                )
+                .map_err(|e| format!("S_FMT mplane: {e}"))?;
+            }
+            let mp = unsafe { fmt.fmt.pix_mp };
+            Ok((mp.width, mp.height, FourCC::from(mp.pixelformat)))
+        }
+    }
+}
+
 fn negotiate_format(dev: &Device) -> Result<NegotiatedFormat, String> {
-    let formats = dev
-        .enum_formats()
-        .map_err(|e| format!("ENUM_FMT: {e}"))?;
-    if formats.is_empty() {
-        return Err("ENUM_FMT returned no formats".into());
+    let mut last = "ENUM_FMT returned no formats".to_string();
+    for mode in [PlaneMode::Single, PlaneMode::Mplane] {
+        let formats = enum_formats_for(dev, mode)?;
+        if formats.is_empty() {
+            cam_debug(format!("ENUM_FMT {:?} → (none)", mode));
+            continue;
+        }
+        cam_debug(format!(
+            "ENUM_FMT {:?} → {}",
+            mode,
+            formats
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+
+        let Some(fourcc) = preferred_fourccs()
+            .into_iter()
+            .find(|p| formats.iter().any(|f| f == p))
+        else {
+            last = format!(
+                "no supported packed format among [{}] (need YUYV/UYVY/MJPG/GREY)",
+                formats
+                    .iter()
+                    .map(|f| f.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            continue;
+        };
+
+        let Some(kind) = fourcc_kind(fourcc) else {
+            last = format!("unsupported FourCC {fourcc}");
+            continue;
+        };
+
+        let (width, height) = pick_resolution(dev, fourcc);
+        match set_format_for(dev, mode, width, height, fourcc) {
+            Ok((w, h, actual_fcc)) => {
+                let kind = fourcc_kind(actual_fcc).unwrap_or(kind);
+                if w == 0 || h == 0 {
+                    last = "S_FMT returned zero size".into();
+                    continue;
+                }
+                cam_debug(format!("S_FMT {:?} → {w}x{h} {actual_fcc} ({kind:?})", mode));
+                return Ok(NegotiatedFormat {
+                    width: w,
+                    height: h,
+                    kind,
+                    mode,
+                });
+            }
+            Err(e) => {
+                last = e;
+            }
+        }
     }
-    cam_debug(format!(
-        "formats: {}",
-        formats
-            .iter()
-            .map(|f| format!("{} ({})", f.fourcc, f.description))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
+    Err(last)
+}
 
-    let prefer = [FourCC::new(b"MJPG"), FourCC::new(b"JPEG"), FourCC::new(b"YUYV")];
-    let fourcc = prefer
-        .into_iter()
-        .find(|p| formats.iter().any(|f| f.fourcc == *p))
-        .or_else(|| formats.first().map(|f| f.fourcc))
-        .ok_or_else(|| "no usable FourCC".to_string())?;
+/// MMAP capture that works for both single-plane and multiplanar buffers.
+struct FrameStream {
+    fd: std::os::fd::RawFd,
+    mode: PlaneMode,
+    mapped: Vec<(*mut u8, usize)>,
+    count: u32,
+    queued: bool,
+}
 
-    let kind = fourcc_kind(fourcc).ok_or_else(|| {
-        format!("unsupported FourCC {fourcc} (need MJPG/YUYV)")
-    })?;
+// SAFETY: we only use mapped buffers while the device fd is open and STREAMON.
+unsafe impl Send for FrameStream {}
 
-    let (width, height) = pick_resolution(dev, fourcc);
-    let requested = Format::new(width, height, fourcc);
-    let actual = dev
-        .set_format(&requested)
-        .map_err(|e| format!("S_FMT {width}x{height} {fourcc}: {e}"))?;
+impl FrameStream {
+    fn open(dev: &Device, mode: PlaneMode, count: u32) -> Result<Self, String> {
+        let fd = dev.handle().fd();
+        let buf_type = mode.buf_type() as u32;
+        let mut req = unsafe { std::mem::zeroed::<v4l2_requestbuffers>() };
+        req.count = count;
+        req.type_ = buf_type;
+        req.memory = 1; // V4L2_MEMORY_MMAP
+        unsafe {
+            v4l2::ioctl(
+                fd,
+                v4l2::vidioc::VIDIOC_REQBUFS,
+                &mut req as *mut _ as *mut std::os::raw::c_void,
+            )
+            .map_err(|e| format!("REQBUFS: {e}"))?;
+        }
+        if req.count == 0 {
+            return Err("REQBUFS returned 0 buffers".into());
+        }
 
-    let kind = fourcc_kind(actual.fourcc).unwrap_or(kind);
-    cam_debug(format!(
-        "S_FMT -> {}x{} {} ({kind:?})",
-        actual.width, actual.height, actual.fourcc
-    ));
-    if actual.width == 0 || actual.height == 0 {
-        return Err("S_FMT returned zero size".into());
+        let mut mapped = Vec::new();
+        for index in 0..req.count {
+            let (ptr, len) = match mode {
+                PlaneMode::Single => {
+                    let mut buf = unsafe { std::mem::zeroed::<v4l2_buffer>() };
+                    buf.type_ = buf_type;
+                    buf.memory = 1;
+                    buf.index = index;
+                    unsafe {
+                        v4l2::ioctl(
+                            fd,
+                            v4l2::vidioc::VIDIOC_QUERYBUF,
+                            &mut buf as *mut _ as *mut std::os::raw::c_void,
+                        )
+                        .map_err(|e| format!("QUERYBUF: {e}"))?;
+                    }
+                    let offset = unsafe { buf.m.offset };
+                    let len = buf.length as usize;
+                    let ptr = unsafe {
+                        v4l2::mmap(
+                            std::ptr::null_mut(),
+                            len,
+                            libc::PROT_READ | libc::PROT_WRITE,
+                            libc::MAP_SHARED,
+                            fd,
+                            offset as libc::off_t,
+                        )
+                        .map_err(|e| format!("mmap: {e}"))?
+                    };
+                    (ptr as *mut u8, len)
+                }
+                PlaneMode::Mplane => {
+                    let mut planes = [unsafe { std::mem::zeroed::<v4l2_plane>() }; 8];
+                    let mut buf = unsafe { std::mem::zeroed::<v4l2_buffer>() };
+                    buf.type_ = buf_type;
+                    buf.memory = 1;
+                    buf.index = index;
+                    buf.length = planes.len() as u32;
+                    buf.m = v4l2_buffer__bindgen_ty_1 {
+                        planes: planes.as_mut_ptr(),
+                    };
+                    unsafe {
+                        v4l2::ioctl(
+                            fd,
+                            v4l2::vidioc::VIDIOC_QUERYBUF,
+                            &mut buf as *mut _ as *mut std::os::raw::c_void,
+                        )
+                        .map_err(|e| format!("QUERYBUF mplane: {e}"))?;
+                    }
+                    let plane = planes[0];
+                    let len = plane.length as usize;
+                    let offset = unsafe { plane.m.mem_offset };
+                    let ptr = unsafe {
+                        v4l2::mmap(
+                            std::ptr::null_mut(),
+                            len,
+                            libc::PROT_READ | libc::PROT_WRITE,
+                            libc::MAP_SHARED,
+                            fd,
+                            offset as libc::off_t,
+                        )
+                        .map_err(|e| format!("mmap mplane: {e}"))?
+                    };
+                    (ptr as *mut u8, len)
+                }
+            };
+            mapped.push((ptr, len));
+        }
+
+        let mut stream = Self {
+            fd,
+            mode,
+            mapped,
+            count: req.count,
+            queued: false,
+        };
+        stream.queue_all()?;
+        stream.stream_on()?;
+        Ok(stream)
     }
-    Ok(NegotiatedFormat {
-        width: actual.width,
-        height: actual.height,
-        kind,
-    })
+
+    fn queue_all(&mut self) -> Result<(), String> {
+        let buf_type = self.mode.buf_type() as u32;
+        for index in 0..self.count {
+            match self.mode {
+                PlaneMode::Single => {
+                    let mut buf = unsafe { std::mem::zeroed::<v4l2_buffer>() };
+                    buf.type_ = buf_type;
+                    buf.memory = 1;
+                    buf.index = index;
+                    unsafe {
+                        v4l2::ioctl(
+                            self.fd,
+                            v4l2::vidioc::VIDIOC_QBUF,
+                            &mut buf as *mut _ as *mut std::os::raw::c_void,
+                        )
+                        .map_err(|e| format!("QBUF: {e}"))?;
+                    }
+                }
+                PlaneMode::Mplane => {
+                    let mut planes = [unsafe { std::mem::zeroed::<v4l2_plane>() }; 8];
+                    let mut buf = unsafe { std::mem::zeroed::<v4l2_buffer>() };
+                    buf.type_ = buf_type;
+                    buf.memory = 1;
+                    buf.index = index;
+                    buf.length = 1;
+                    buf.m = v4l2_buffer__bindgen_ty_1 {
+                        planes: planes.as_mut_ptr(),
+                    };
+                    unsafe {
+                        v4l2::ioctl(
+                            self.fd,
+                            v4l2::vidioc::VIDIOC_QBUF,
+                            &mut buf as *mut _ as *mut std::os::raw::c_void,
+                        )
+                        .map_err(|e| format!("QBUF mplane: {e}"))?;
+                    }
+                }
+            }
+        }
+        self.queued = true;
+        Ok(())
+    }
+
+    fn stream_on(&self) -> Result<(), String> {
+        let mut typ = self.mode.buf_type() as u32;
+        unsafe {
+            v4l2::ioctl(
+                self.fd,
+                v4l2::vidioc::VIDIOC_STREAMON,
+                &mut typ as *mut _ as *mut std::os::raw::c_void,
+            )
+            .map_err(|e| format!("STREAMON: {e}"))?;
+        }
+        Ok(())
+    }
+
+    fn stream_off(&self) {
+        let mut typ = self.mode.buf_type() as u32;
+        let _ = unsafe {
+            v4l2::ioctl(
+                self.fd,
+                v4l2::vidioc::VIDIOC_STREAMOFF,
+                &mut typ as *mut _ as *mut std::os::raw::c_void,
+            )
+        };
+    }
+
+    /// Returns a copy of the next frame bytes (bytesused).
+    fn next_frame(&mut self) -> Result<Vec<u8>, String> {
+        self.poll_readable(2000)?;
+        let buf_type = self.mode.buf_type() as u32;
+        let (index, data_offset, payload) = match self.mode {
+            PlaneMode::Single => {
+                let mut buf = unsafe { std::mem::zeroed::<v4l2_buffer>() };
+                buf.type_ = buf_type;
+                buf.memory = 1;
+                unsafe {
+                    v4l2::ioctl(
+                        self.fd,
+                        v4l2::vidioc::VIDIOC_DQBUF,
+                        &mut buf as *mut _ as *mut std::os::raw::c_void,
+                    )
+                    .map_err(|e| format!("DQBUF: {e}"))?;
+                }
+                (buf.index, 0usize, buf.bytesused as usize)
+            }
+            PlaneMode::Mplane => {
+                let mut planes = [unsafe { std::mem::zeroed::<v4l2_plane>() }; 8];
+                let mut buf = unsafe { std::mem::zeroed::<v4l2_buffer>() };
+                buf.type_ = buf_type;
+                buf.memory = 1;
+                buf.length = 1;
+                buf.m = v4l2_buffer__bindgen_ty_1 {
+                    planes: planes.as_mut_ptr(),
+                };
+                unsafe {
+                    v4l2::ioctl(
+                        self.fd,
+                        v4l2::vidioc::VIDIOC_DQBUF,
+                        &mut buf as *mut _ as *mut std::os::raw::c_void,
+                    )
+                    .map_err(|e| format!("DQBUF mplane: {e}"))?;
+                }
+                let used = planes[0].bytesused as usize;
+                let offset = planes[0].data_offset as usize;
+                let payload = used.saturating_sub(offset);
+                (buf.index, offset, payload)
+            }
+        };
+
+        let (ptr, len) = self
+            .mapped
+            .get(index as usize)
+            .copied()
+            .ok_or_else(|| format!("bad buffer index {index}"))?;
+        if data_offset >= len {
+            return Err("mplane data_offset past buffer".into());
+        }
+        let n = payload.min(len - data_offset);
+        let data = unsafe { std::slice::from_raw_parts(ptr.add(data_offset), n) }.to_vec();
+
+        // Re-queue
+        match self.mode {
+            PlaneMode::Single => {
+                let mut buf = unsafe { std::mem::zeroed::<v4l2_buffer>() };
+                buf.type_ = buf_type;
+                buf.memory = 1;
+                buf.index = index;
+                unsafe {
+                    v4l2::ioctl(
+                        self.fd,
+                        v4l2::vidioc::VIDIOC_QBUF,
+                        &mut buf as *mut _ as *mut std::os::raw::c_void,
+                    )
+                    .map_err(|e| format!("QBUF: {e}"))?;
+                }
+            }
+            PlaneMode::Mplane => {
+                let mut planes = [unsafe { std::mem::zeroed::<v4l2_plane>() }; 8];
+                let mut buf = unsafe { std::mem::zeroed::<v4l2_buffer>() };
+                buf.type_ = buf_type;
+                buf.memory = 1;
+                buf.index = index;
+                buf.length = 1;
+                buf.m = v4l2_buffer__bindgen_ty_1 {
+                    planes: planes.as_mut_ptr(),
+                };
+                unsafe {
+                    v4l2::ioctl(
+                        self.fd,
+                        v4l2::vidioc::VIDIOC_QBUF,
+                        &mut buf as *mut _ as *mut std::os::raw::c_void,
+                    )
+                    .map_err(|e| format!("QBUF mplane: {e}"))?;
+                }
+            }
+        }
+        Ok(data)
+    }
+
+    fn poll_readable(&self, timeout_ms: i32) -> Result<(), String> {
+        let mut pfd = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if rc < 0 {
+            return Err("poll failed".into());
+        }
+        if rc == 0 {
+            return Err("timeout waiting for frame".into());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FrameStream {
+    fn drop(&mut self) {
+        self.stream_off();
+        for &(ptr, len) in &self.mapped {
+            if !ptr.is_null() && len > 0 {
+                let _ = unsafe { v4l2::munmap(ptr as *mut _, len) };
+            }
+        }
+        self.mapped.clear();
+    }
 }
 
 /// Try opening `path`, negotiating format, and reading one frame.
 fn try_device(path: &Path) -> Result<NegotiatedFormat, String> {
-    let mut dev = Device::with_path(path).map_err(|e| format!("open: {e}"))?;
+    let dev = Device::with_path(path).map_err(|e| format!("open: {e}"))?;
     let fmt = negotiate_format(&dev)?;
-    let mut stream = MmapStream::with_buffers(&mut dev, BufType::VideoCapture, 4)
-        .map_err(|e| format!("REQBUFS/mmap: {e}"))?;
-    let _ = stream.next().map_err(|e| format!("first frame: {e}"))?;
+    let mut stream = FrameStream::open(&dev, fmt.mode, 4)?;
+    let _ = stream.next_frame()?;
     Ok(fmt)
 }
 
@@ -472,7 +905,8 @@ fn open_first_working() -> Result<(PathBuf, NegotiatedFormat), CameraError> {
         " Device busy — close other camera apps."
     } else {
         " Try LIBREFOOD_CAMERA_DEVICE=/dev/video0 and LIBREFOOD_CAMERA_DEBUG=1; \
-         check `v4l2-ctl --list-formats-ext -d /dev/video0`."
+         check `v4l2-ctl --list-formats-ext -d /dev/video0` \
+         (phones often need Multiplanar + UYVY/YUYV; some CAMSS pads need libcamera)."
     };
 
     Err(CameraError::Open(format!(
@@ -491,29 +925,50 @@ fn mjpeg_to_rgb(data: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     Ok((img.width(), img.height(), img.into_raw()))
 }
 
-fn yuyv_to_rgb(width: u32, height: u32, yuyv: &[u8]) -> Result<Vec<u8>, String> {
+fn yuv_pair_to_rgb(y0: i32, y1: i32, u: i32, v: i32, out: &mut Vec<u8>) {
+    let u = u - 128;
+    let v = v - 128;
+    for y in [y0, y1] {
+        let r = (y + ((351 * v) >> 8)).clamp(0, 255) as u8;
+        let g = (y - ((179 * v + 86 * u) >> 8)).clamp(0, 255) as u8;
+        let b = (y + ((443 * u) >> 8)).clamp(0, 255) as u8;
+        out.extend_from_slice(&[r, g, b]);
+    }
+}
+
+fn packed_yuv_to_rgb(kind: PixelKind, width: u32, height: u32, data: &[u8]) -> Result<Vec<u8>, String> {
     let need = (width as usize).saturating_mul(height as usize).saturating_mul(2);
-    if yuyv.len() < need {
+    if data.len() < need {
         return Err(format!(
-            "YUYV buffer too small: got {} need {need}",
-            yuyv.len()
+            "{kind:?} buffer too small: got {} need {need}",
+            data.len()
         ));
     }
     if width % 2 != 0 {
-        return Err("YUYV width must be even".into());
+        return Err("packed YUV width must be even".into());
     }
     let mut rgb = Vec::with_capacity((width * height * 3) as usize);
-    for chunk in yuyv[..need].chunks_exact(4) {
-        let y0 = chunk[0] as i32;
-        let u = chunk[1] as i32 - 128;
-        let y1 = chunk[2] as i32;
-        let v = chunk[3] as i32 - 128;
-        for y in [y0, y1] {
-            let r = (y + ((351 * v) >> 8)).clamp(0, 255) as u8;
-            let g = (y - ((179 * v + 86 * u) >> 8)).clamp(0, 255) as u8;
-            let b = (y + ((443 * u) >> 8)).clamp(0, 255) as u8;
-            rgb.extend_from_slice(&[r, g, b]);
-        }
+    for chunk in data[..need].chunks_exact(4) {
+        let (y0, y1, u, v) = match kind {
+            PixelKind::Yuyv => (chunk[0] as i32, chunk[2] as i32, chunk[1] as i32, chunk[3] as i32),
+            PixelKind::Uyvy => (chunk[1] as i32, chunk[3] as i32, chunk[0] as i32, chunk[2] as i32),
+            PixelKind::Vyuy => (chunk[1] as i32, chunk[3] as i32, chunk[2] as i32, chunk[0] as i32),
+            PixelKind::Yvyu => (chunk[0] as i32, chunk[2] as i32, chunk[3] as i32, chunk[1] as i32),
+            _ => unreachable!(),
+        };
+        yuv_pair_to_rgb(y0, y1, u, v, &mut rgb);
+    }
+    Ok(rgb)
+}
+
+fn grey_to_rgb(width: u32, height: u32, grey: &[u8]) -> Result<Vec<u8>, String> {
+    let need = (width as usize).saturating_mul(height as usize);
+    if grey.len() < need {
+        return Err(format!("GREY buffer too small: got {} need {need}", grey.len()));
+    }
+    let mut rgb = Vec::with_capacity(need * 3);
+    for &g in &grey[..need] {
+        rgb.extend_from_slice(&[g, g, g]);
     }
     Ok(rgb)
 }
@@ -521,7 +976,10 @@ fn yuyv_to_rgb(width: u32, height: u32, yuyv: &[u8]) -> Result<Vec<u8>, String> 
 fn frame_to_rgb(kind: PixelKind, width: u32, height: u32, buf: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     match kind {
         PixelKind::Mjpeg => mjpeg_to_rgb(buf),
-        PixelKind::Yuyv => Ok((width, height, yuyv_to_rgb(width, height, buf)?)),
+        PixelKind::Yuyv | PixelKind::Uyvy | PixelKind::Vyuy | PixelKind::Yvyu => {
+            Ok((width, height, packed_yuv_to_rgb(kind, width, height, buf)?))
+        }
+        PixelKind::Grey => Ok((width, height, grey_to_rgb(width, height, buf)?)),
     }
 }
 
@@ -578,20 +1036,20 @@ where
 {
     let (path, negotiated) = open_first_working()?;
     cam_debug(format!(
-        "scanning on {} {}x{} {:?}",
+        "scanning on {} {}x{} {:?} ({:?})",
         path.display(),
         negotiated.width,
         negotiated.height,
-        negotiated.kind
+        negotiated.kind,
+        negotiated.mode
     ));
 
-    let mut dev = Device::with_path(&path).map_err(|e| CameraError::Open(e.to_string()))?;
-    // Re-apply format after reopen.
-    let _ = negotiate_format(&dev).map_err(CameraError::Open)?;
-    let mut stream = MmapStream::with_buffers(&mut dev, BufType::VideoCapture, 4)
-        .map_err(|e| CameraError::Open(format!("mmap stream: {e}")))?;
+    let dev = Device::with_path(&path).map_err(|e| CameraError::Open(e.to_string()))?;
+    // Re-apply format after reopen (must match mode from probe).
+    let fmt = negotiate_format(&dev).map_err(CameraError::Open)?;
+    let mut stream =
+        FrameStream::open(&dev, fmt.mode, 4).map_err(CameraError::Open)?;
 
-    // Brief warm-up; ignore first couple of failures on flaky USB cams.
     std::thread::sleep(Duration::from_millis(50));
 
     let mut last_err = CameraError::NoBarcode;
@@ -600,16 +1058,16 @@ where
             return Err(CameraError::Cancelled);
         }
 
-        let (buf, _meta) = match stream.next() {
+        let buf = match stream.next_frame() {
             Ok(v) => v,
             Err(e) => {
-                last_err = CameraError::Capture(e.to_string());
+                last_err = CameraError::Capture(e);
                 continue;
             }
         };
 
         let (width, height, rgb) =
-            match frame_to_rgb(negotiated.kind, negotiated.width, negotiated.height, buf) {
+            match frame_to_rgb(fmt.kind, fmt.width, fmt.height, &buf) {
                 Ok(v) => v,
                 Err(e) => {
                     last_err = CameraError::Capture(e);
@@ -717,10 +1175,12 @@ mod tests {
     fn yuyv_roundtrip_size() {
         let w = 4u32;
         let h = 2u32;
-        // 4*2*2 = 16 bytes YUYV
         let yuyv = vec![16u8, 128, 16, 128, 16, 128, 16, 128, 16, 128, 16, 128, 16, 128, 16, 128];
-        let rgb = yuyv_to_rgb(w, h, &yuyv).unwrap();
+        let rgb = packed_yuv_to_rgb(PixelKind::Yuyv, w, h, &yuyv).unwrap();
         assert_eq!(rgb.len(), (w * h * 3) as usize);
+        let uyvy = vec![128u8, 16, 128, 16, 128, 16, 128, 16, 128, 16, 128, 16, 128, 16, 128, 16];
+        let rgb2 = packed_yuv_to_rgb(PixelKind::Uyvy, w, h, &uyvy).unwrap();
+        assert_eq!(rgb2.len(), (w * h * 3) as usize);
     }
 
     #[test]

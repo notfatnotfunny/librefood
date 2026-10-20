@@ -35,7 +35,7 @@ Same list: [`alpine-dependencies.txt`](alpine-dependencies.txt).
 
 ## Camera
 
-Raw V4L2 capture (MJPEG/YUYV) — needs a capture node and `video` group:
+Raw V4L2 capture (single-plane MJPEG/YUYV or multiplanar UYVY/YUYV for phone CAMSS) — needs a capture node and `video` group:
 
 ```bash
 ls -l /dev/video*

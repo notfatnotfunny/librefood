@@ -64,6 +64,17 @@ struct Company {
     name: Option<String>,
     #[serde(default)]
     r#type: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    alternatives: Vec<Alternative>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Alternative {
+    name: Option<String>,
+    #[serde(default)]
+    website: Option<String>,
 }
 
 /// Enrich `product` with [`attrs::BOYCOTT_LISTED`] (1 = match, 0 = no match).
@@ -102,16 +113,9 @@ pub fn apply(product: &mut ProductModel) {
                 // Match API hits against the query *and* original brand strings
                 // (legal entity search can 404 while "Coca-Cola" hits).
                 if let Some(hit) = best_match_among(q, product, &companies) {
-                    let label = hit.name.as_deref().unwrap_or(q);
-                    let kind = hit.r#type.as_deref().unwrap_or("listed");
                     product.attributes.insert(
                         attrs::BOYCOTT_LISTED.to_string(),
-                        AttrValue::present(
-                            1.0,
-                            format!(
-                                "boycottisraeli.biz matched “{label}” ({kind}) via query “{q}”"
-                            ),
-                        ),
+                        AttrValue::present(1.0, match_source(hit, q)),
                     );
                     return;
                 }
@@ -183,17 +187,6 @@ fn brand_queries(product: &ProductModel) -> Vec<String> {
         }
         if !is_legal_stop(r) && r.chars().count() >= 4 {
             push_unique(&mut out, r);
-        }
-    }
-
-    // Product-name hint: "Cocacola zero sugar" → try leading token if long enough.
-    let name = product.name.trim();
-    if !name.is_empty() {
-        if let Some(tok) = name.split_whitespace().next() {
-            let t = tok.trim_matches(|c: char| !c.is_alphanumeric() && c != '-');
-            if t.chars().count() >= 5 && !is_legal_stop(t) {
-                push_unique(&mut out, t);
-            }
         }
     }
 
@@ -378,6 +371,101 @@ fn normalize(s: &str) -> String {
         .join(" ")
 }
 
+/// Build the attribute source note: match label, brief why, cited alternatives.
+fn match_source(hit: &Company, query: &str) -> String {
+    let label = hit.name.as_deref().unwrap_or(query);
+    let kind = humanize_type(hit.r#type.as_deref().unwrap_or("listed"));
+    let mut parts = vec![format!("boycottisraeli.biz · “{label}” ({kind})")];
+    if let Some(why) = brief_why(hit.description.as_deref()) {
+        parts.push(format!("Why: {why}"));
+    }
+    if let Some(alts) = format_alternatives(&hit.alternatives) {
+        parts.push(format!("Alternatives: {alts}"));
+    }
+    parts.join("\n")
+}
+
+fn humanize_type(t: &str) -> String {
+    t.replace('-', " ")
+}
+
+/// Prefer the API’s “Israel Connection” blurb; else the first paragraph. Keep it short.
+fn brief_why(description: Option<&str>) -> Option<String> {
+    let raw = description?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let stripped = strip_md_light(raw);
+    let focus = if let Some(idx) = stripped
+        .to_ascii_lowercase()
+        .find("israel connection:")
+    {
+        stripped[idx + "israel connection:".len()..].trim()
+    } else {
+        stripped
+            .split("\n\n")
+            .next()
+            .unwrap_or(stripped.as_str())
+            .trim()
+    };
+    let focus = focus.trim_start_matches(['*', ':', '-', ' ']).trim();
+    if focus.is_empty() {
+        return None;
+    }
+    Some(truncate_words(focus, 240))
+}
+
+fn format_alternatives(alts: &[Alternative]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for a in alts.iter().take(4) {
+        let Some(name) = a.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        match a
+            .website
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(url) => parts.push(format!("{name} ({url})")),
+            None => parts.push(name.to_string()),
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
+fn strip_md_light(s: &str) -> String {
+    s.replace("**", "").replace("__", "")
+}
+
+fn truncate_words(s: &str, max_chars: usize) -> String {
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.chars().count() <= max_chars {
+        return s;
+    }
+    let mut out = String::new();
+    for w in s.split_whitespace() {
+        let next_len = out.chars().count() + 1 + w.chars().count();
+        if !out.is_empty() && next_len > max_chars.saturating_sub(1) {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+    if out.is_empty() {
+        s.chars().take(max_chars.saturating_sub(1)).collect::<String>() + "…"
+    } else {
+        out.push('…');
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,6 +508,17 @@ mod tests {
         );
         assert!(!q.iter().any(|x| x.eq_ignore_ascii_case("NV")), "queries={q:?}");
         assert!(!q.iter().any(|x| x.eq_ignore_ascii_case("SA")), "queries={q:?}");
+        assert!(
+            !q.iter().any(|x| x.eq_ignore_ascii_case("Cocacola")),
+            "must not use product-name token: {q:?}"
+        );
+    }
+
+    #[test]
+    fn brand_queries_ignore_product_name_tokens() {
+        let p = product("Barilla", "Pesto Rosso 200g");
+        let q = brand_queries(&p);
+        assert_eq!(q, vec!["Barilla".to_string()], "queries={q:?}");
     }
 
     #[test]
@@ -427,6 +526,8 @@ mod tests {
         let cos = vec![Company {
             name: Some("The Coca-Cola Company".into()),
             r#type: Some("supports-israel".into()),
+            description: None,
+            alternatives: vec![],
         }];
         let p = product("COCA-COLA SERVICES SA/NV", "Cocacola zero sugar");
         assert!(best_match_among("COCA-COLA", &p, &cos).is_some());
@@ -439,9 +540,45 @@ mod tests {
         let cos = vec![Company {
             name: Some("NVIDIA".into()),
             r#type: Some("supports-israel".into()),
+            description: None,
+            alternatives: vec![],
         }];
         let p = product("NV", "x");
         assert!(best_match_among("NV", &p, &cos).is_none());
+    }
+
+    #[test]
+    fn match_source_includes_why_and_alternatives() {
+        let hit = Company {
+            name: Some("Coca-Cola".into()),
+            r#type: Some("supports-israel".into()),
+            description: Some(
+                "Coca-Cola operates in Israel.\n\n**Israel Connection:** Israeli bottler operates in the West Bank. Long-standing BDS target.".into(),
+            ),
+            alternatives: vec![
+                Alternative {
+                    name: Some("Cawston Press".into()),
+                    website: Some("https://www.cawstonpress.com".into()),
+                },
+                Alternative {
+                    name: Some("Fever-Tree".into()),
+                    website: Some("https://www.fever-tree.com".into()),
+                },
+            ],
+        };
+        let src = match_source(&hit, "Coca-Cola");
+        assert!(src.contains("Coca-Cola"), "{src}");
+        assert!(src.contains("supports israel"), "{src}");
+        assert!(
+            src.contains("Why:") && src.contains("West Bank"),
+            "{src}"
+        );
+        assert!(
+            src.contains("Alternatives:")
+                && src.contains("Cawston Press (https://www.cawstonpress.com)")
+                && src.contains("Fever-Tree (https://www.fever-tree.com)"),
+            "{src}"
+        );
     }
 
     #[test]
@@ -452,6 +589,11 @@ mod tests {
         let attr = p.attributes.get(attrs::BOYCOTT_LISTED).expect("attr");
         assert_eq!(attr.availability, AttrAvailability::Present);
         assert_eq!(attr.value, Some(1.0), "src={}", attr.source);
+        assert!(
+            attr.source.contains("Why:") || attr.source.contains("Alternatives:"),
+            "expected why/alternatives in src={}",
+            attr.source
+        );
     }
 
     #[test]

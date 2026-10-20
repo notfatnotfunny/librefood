@@ -68,7 +68,12 @@ pub fn summary_from_result(result: &ScoreResult) -> ScoreSummary {
             Some(a) => format!("{a:+.1}"),
             None => "—".into(),
         };
-        let detail = format!("{rule_bit} · src {}", c.source);
+        let detail = if c.attribute == "boycott_listed" {
+            // Boycott source already carries why + alternatives; show on its own lines.
+            format!("{rule_bit}\n{}", c.source)
+        } else {
+            format!("{rule_bit} · src {}", c.source)
+        };
         let row = FactorRow {
             title: c.title.clone(),
             detail,

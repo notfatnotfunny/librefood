@@ -2146,6 +2146,10 @@ impl Component for AppModel {
                 self.scan_control = None;
                 self.scan_can_switch = false;
                 self.scan_camera_label.clear();
+                // Ensure "Switching…" cannot stick after the capture thread exits.
+                if self.status_text.starts_with("Switching camera") {
+                    self.status_text.clear();
+                }
                 match result {
                     Ok(code) => {
                         self.barcode = off::normalize_barcode(&code);

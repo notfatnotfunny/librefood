@@ -1255,77 +1255,71 @@ where
             return Err(CameraError::Cancelled);
         }
 
-        // Snapshot-style flip: tear down the current pipeline, then recreate
-        // libcamerasrc with the next camera-name. Label-only updates are not enough.
+        // Snapshot-style flip: tear down, then recreate with the **same backend**
+        // (pipewire target-object or libcamerasrc) — never require libcamerasrc
+        // when the live stream was pipewire-only.
         if control.cycle.swap(false, Ordering::SeqCst) && cameras.len() > 1 {
             let old_id = current_id.clone();
+            let prefer = cam.source();
             let pos = cameras
                 .iter()
                 .position(|c| Some(c.id.as_str()) == old_id.as_deref())
                 .unwrap_or(0);
             let next = &cameras[(pos + 1) % cameras.len()];
             cam_debug(format!(
-                "switch request old_id={:?} new_id={:?} label={:?}",
-                old_id, next.id, next.label
+                "switch request old_id={:?} new_id={:?} label={:?} backend={}",
+                old_id,
+                next.id,
+                next.label,
+                prefer.label()
             ));
 
-            // Release CAMSS / libcamera before opening the other sensor.
             cam.shutdown();
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(Duration::from_millis(300));
 
-            match crate::gst_cam::GstCamera::open_libcamera_named(&next.id) {
+            match crate::gst_cam::GstCamera::open_for_switch(&next.id, prefer) {
                 Ok(new_cam) => {
-                    let applied = new_cam.camera_name().map(str::to_string);
-                    if applied.as_deref() != Some(next.id.as_str()) {
-                        cam_debug(format!(
-                            "pipeline recreate FAIL old_id={:?} new_id={:?} applied={applied:?}",
-                            old_id, next.id
-                        ));
-                        new_cam.shutdown();
-                        std::thread::sleep(Duration::from_millis(200));
-                        cam = restore_gst_camera(old_id.as_deref())?;
-                        current_id = cam.camera_name().map(str::to_string);
-                        let label = cam.camera_label();
-                        if let Ok(mut g) = control.label.lock() {
-                            *g = label;
-                        }
-                        last_err = CameraError::Open(format!(
-                            "switch camera: opened but camera-name mismatch (want {})",
-                            next.id
-                        ));
-                        control.switching.store(false, Ordering::SeqCst);
-                        clear_switching_on_frame = false;
-                    } else {
-                        cam_debug(format!(
-                            "pipeline recreate OK old_id={:?} new_id={:?}",
-                            old_id, next.id
-                        ));
-                        cam = new_cam;
-                        current_id = Some(next.id.clone());
-                        crate::gst_cam::save_camera_id(&next.id);
-                        let label = cam.camera_label();
-                        if let Ok(mut g) = control.label.lock() {
-                            *g = label;
-                        }
-                        // Clear "Switching…" when the first preview frame from the
-                        // new pipeline reaches the UI (open already probed one frame).
-                        clear_switching_on_frame = true;
+                    cam_debug(format!(
+                        "pipeline recreate OK old_id={:?} new_id={:?} via={}",
+                        old_id,
+                        new_cam.camera_name(),
+                        new_cam.source_label()
+                    ));
+                    cam = new_cam;
+                    current_id = cam.camera_name().map(str::to_string);
+                    if let Some(id) = current_id.as_deref() {
+                        crate::gst_cam::save_camera_id(id);
                     }
+                    let label = cam.camera_label();
+                    if let Ok(mut g) = control.label.lock() {
+                        *g = label;
+                    }
+                    clear_switching_on_frame = true;
                 }
                 Err(e) => {
                     cam_debug(format!(
                         "pipeline recreate FAIL old_id={:?} new_id={:?}: {e}",
                         old_id, next.id
                     ));
-                    cam = restore_gst_camera(old_id.as_deref())?;
-                    current_id = cam.camera_name().map(str::to_string);
-                    let label = cam.camera_label();
-                    if let Ok(mut g) = control.label.lock() {
-                        *g = label;
-                    }
-                    last_err = CameraError::Open(format!("switch camera: {e}"));
+                    // Clear UI "Switching…" even if restore fails — never hang.
                     control.switching.store(false, Ordering::SeqCst);
                     clear_switching_on_frame = false;
+                    match restore_gst_camera(old_id.as_deref(), prefer) {
+                        Ok(c) => {
+                            cam = c;
+                            current_id = cam.camera_name().map(str::to_string);
+                            let label = cam.camera_label();
+                            if let Ok(mut g) = control.label.lock() {
+                                *g = label;
+                            }
+                            last_err = CameraError::Open(format!("switch camera: {e}"));
+                        }
+                        Err(re) => {
+                            return Err(CameraError::Open(format!(
+                                "switch failed ({e}); could not restore camera ({re})"
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -1357,12 +1351,18 @@ where
     }
 }
 
-/// Re-open after a failed mid-scan switch (prefer previous id, else auto).
-fn restore_gst_camera(old_id: Option<&str>) -> Result<crate::gst_cam::GstCamera, CameraError> {
+/// Re-open after a failed mid-scan switch (same backend as before when possible).
+fn restore_gst_camera(
+    old_id: Option<&str>,
+    prefer: crate::gst_cam::GstSource,
+) -> Result<crate::gst_cam::GstCamera, CameraError> {
     if let Some(id) = old_id {
-        match crate::gst_cam::GstCamera::open_libcamera_named(id) {
+        match crate::gst_cam::GstCamera::open_for_switch(id, prefer) {
             Ok(c) => {
-                cam_debug(format!("restore camera OK id={id:?}"));
+                cam_debug(format!(
+                    "restore camera OK id={id:?} via={}",
+                    c.source_label()
+                ));
                 return Ok(c);
             }
             Err(e) => cam_debug(format!("restore named {id:?} failed: {e}")),

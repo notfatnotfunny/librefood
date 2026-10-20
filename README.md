@@ -44,12 +44,14 @@ Two capture paths:
 
 ### Alpine phone (fajita / postmarketOS)
 
+PipeWire is enough for Scan + **Switch camera** (Front↔Back). `gst-plugin-libcamera` is **optional**.
+
 ```bash
-sudo apk add libcamera libcamera-tools gst-plugins-base \
-  gstreamer-tools pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-gtk
-# libcamerasrc plugin — package name varies by Alpine release; try one of:
+sudo apk add gst-plugins-base gstreamer-tools \
+  pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-gtk
+# optional (preferred when packaged): libcamera + libcamerasrc
+sudo apk add libcamera libcamera-tools || true
 sudo apk add gst-plugin-libcamera || sudo apk add gst-plugins-libcamera || true
-# search if needed: apk search libcamera; apk search gstreamer | grep -i camera
 sudo adduser $USER video   # then log out / in
 ```
 
@@ -59,12 +61,14 @@ Build deps for GStreamer Rust crates (already covered by `glib-dev` + typically)
 sudo apk add gstreamer-dev gst-plugins-base-dev
 ```
 
-Verify:
+Verify (pipewire-only OK):
 
 ```bash
-gst-inspect-1.0 libcamerasrc    # should list the element
-# optional: cam -l   or   libcamera-hello --list-cameras
-LIBREFOOD_CAMERA_DEBUG=1 LIBREFOOD_CAMERA_BACKEND=libcamera ./target/release/librefood
+gst-inspect-1.0 pipewiresrc     # required on Alpine without libcamerasrc
+gst-inspect-1.0 libcamerasrc    # optional
+gst-device-monitor-1.0 Video/Source | head -80   # Front/Back + object.serial
+LIBREFOOD_CAMERA_DEBUG=1 ./target/release/librefood
+# Scan → expect Back; Switch camera → preview must change (no freeze)
 ```
 
 ### Arch (dev / USB)
@@ -84,19 +88,16 @@ sudo pacman -S libcamera gst-plugin-libcamera pipewire
 | `LIBREFOOD_CAMERA_BACKEND=auto` | Default: libcamera first on CAMSS, else V4L2 then gst |
 | `…=libcamera` / `pipewire` / `v4l2` | Force one backend |
 | `LIBREFOOD_CAMERA_FACING=back` | Prefer rear cameras (default). `front` / `any` also OK |
-| `LIBREFOOD_CAMERA_NAME=…` | Exact libcamera id (`cam --list` id in parentheses) |
+| `LIBREFOOD_CAMERA_NAME=…` | Exact camera id (PipeWire `object.serial`, libcamera id, or display name) |
 | `LIBREFOOD_CAMERA_INDEX=0` | Among matching facing cams, pick Nth (0 = primary rear) |
 
-On fajita (multiple cams), default is **back** (libcamera `Location`, not `/dev/video0`). During scan, **Switch camera** cycles cameras (Snapshot-style); the last choice is saved in `~/.config/librefood/camera-id`.
+On fajita (multiple cams), default is **back** (largest back area when using PipeWire; libcamera `Location` when available — not `/dev/video0`). **Switch camera** cycles Front/Back only (CAMSS V4L junk filtered out) and recreates the same backend (`pipewiresrc target-object=…` or `libcamerasrc`). Last choice: `~/.config/librefood/camera-id`.
 
 ```bash
-cam --list
 LIBREFOOD_CAMERA_DEBUG=1 ./target/release/librefood
 # second rear: LIBREFOOD_CAMERA_FACING=back LIBREFOOD_CAMERA_INDEX=1
-# or: LIBREFOOD_CAMERA_NAME='/base/soc@0/…'
+# or: LIBREFOOD_CAMERA_NAME='<object.serial from gst-device-monitor>'
 ```
-
-Optional portal packages (permission dialog for PipeWire path): `xdg-desktop-portal`, pipewire.
 
 Typed barcodes always work. Window placement follows Fractal/Snapshot patterns: phones (Phosh / ≤1080p short edge, e.g. fajita) **maximize** into the shell workarea; desktops open a floating ~800×640 window (resizable). Escape force-maximize: `LIBREFOOD_NO_FULLSCREEN=1`.
 

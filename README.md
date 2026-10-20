@@ -49,7 +49,7 @@ LIBREFOOD_CAMERA_DEBUG=1 ./target/release/librefood
 
 Optional portal packages (permission dialog only; capture is still V4L2): `xdg-desktop-portal`, pipewire.
 
-Typed barcodes always work. Window starts fullscreen/maximized; `LIBREFOOD_NO_FULLSCREEN=1` to disable.
+Typed barcodes always work. On phones (Phosh / ≤1080p short edge, e.g. fajita 1920×1080) the window opens **fullscreen**; desktops maximize. Escape: `LIBREFOOD_NO_FULLSCREEN=1`.
 
 ## License
 

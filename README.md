@@ -25,13 +25,13 @@ sudo pacman -S rust gtk4 libadwaita pkgconf
 ## Alpine Linux
 
 ```bash
-doas apk add $(cat alpine-dependencies.txt)
-# optional camera: apk add v4l-utils; adduser $USER video  # then re-login
+sudo apk add build-base cargo glib-dev pango-dev gdk-pixbuf-dev gtk4.0-dev clang23-dev libadwaita-dev
+# optional camera: sudo apk add v4l-utils; sudo adduser $USER video  # then re-login
 git clone https://github.com/notfatnotfunny/librefood.git
 cd librefood && cargo build --release && ./target/release/librefood
 ```
 
-Packages in [`alpine-dependencies.txt`](alpine-dependencies.txt): `build-base`, `cargo`, `glib-dev`, `pango-dev`, `gdk-pixbuf-dev`, `gtk4.0-dev`, `clang23-dev`, `libadwaita-dev`.
+Same list: [`alpine-dependencies.txt`](alpine-dependencies.txt).
 
 ## Camera
 

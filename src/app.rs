@@ -304,11 +304,20 @@ impl AppModel {
         self.page == AppPage::Profiles && self.editing_profile
     }
 
-    fn nav_classes(&self, page: AppPage) -> [&'static str; 2] {
+    fn nav_classes(&self, page: AppPage) -> [&'static str; 3] {
         if self.page == page {
-            ["flat", "suggested-action"]
+            ["flat", "suggested-action", "bottom-nav-btn"]
         } else {
-            ["flat", "nav-inactive"]
+            ["flat", "nav-inactive", "bottom-nav-btn"]
+        }
+    }
+
+    fn page_subtitle(&self) -> &'static str {
+        match self.page {
+            AppPage::Lookup => "Lookup",
+            AppPage::History => "History",
+            AppPage::Favorites => "Favorites",
+            AppPage::Profiles => "Profiles",
         }
     }
 
@@ -868,55 +877,22 @@ impl Component for AppModel {
             set_height_request: 294,
 
             #[wrap(Some)]
-            set_content = &gtk::Box {
-                set_orientation: gtk::Orientation::Vertical,
+            set_content = &adw::ToolbarView {
+                set_top_bar_style: adw::ToolbarStyle::Flat,
+                set_bottom_bar_style: adw::ToolbarStyle::Raised,
 
-                adw::HeaderBar {
-                    pack_start = &gtk::Box {
-                        set_orientation: gtk::Orientation::Horizontal,
-                        set_spacing: 0,
-                        add_css_class: "linked",
-
-                        gtk::Button {
-                            set_label: "Lookup",
-                            #[watch]
-                            set_css_classes: &model.nav_classes(AppPage::Lookup),
-                            connect_clicked[sender] => move |_| {
-                                sender.input(Msg::ShowPage(AppPage::Lookup));
-                            },
-                        },
-                        gtk::Button {
-                            set_label: "History",
-                            #[watch]
-                            set_css_classes: &model.nav_classes(AppPage::History),
-                            connect_clicked[sender] => move |_| {
-                                sender.input(Msg::ShowPage(AppPage::History));
-                            },
-                        },
-                        gtk::Button {
-                            set_label: "Favorites",
-                            #[watch]
-                            set_css_classes: &model.nav_classes(AppPage::Favorites),
-                            connect_clicked[sender] => move |_| {
-                                sender.input(Msg::ShowPage(AppPage::Favorites));
-                            },
-                        },
-                        gtk::Button {
-                            set_label: "Profiles",
-                            #[watch]
-                            set_css_classes: &model.nav_classes(AppPage::Profiles),
-                            connect_clicked[sender] => move |_| {
-                                sender.input(Msg::ShowPage(AppPage::Profiles));
-                            },
-                        },
-                    },
-
+                add_top_bar = &adw::HeaderBar {
                     #[wrap(Some)]
                     set_title_widget = &adw::WindowTitle {
                         set_title: "Librefood",
-                        set_subtitle: "Configurable scores via Open Food Facts",
+                        #[watch]
+                        set_subtitle: model.page_subtitle(),
                     },
                 },
+
+                #[wrap(Some)]
+                set_content = &gtk::Box {
+                    set_orientation: gtk::Orientation::Vertical,
 
                 // —— Lookup page ——
                 gtk::ScrolledWindow {
@@ -1527,6 +1503,52 @@ impl Component for AppModel {
                         set_margin_start: 14,
                         set_margin_end: 14,
                         set_margin_bottom: 12,
+                    },
+                },
+                },
+
+                add_bottom_bar = &gtk::Box {
+                    set_orientation: gtk::Orientation::Horizontal,
+                    set_homogeneous: true,
+                    set_spacing: 2,
+                    set_hexpand: true,
+                    add_css_class: "bottom-nav",
+
+                    gtk::Button {
+                        set_label: "Lookup",
+                        set_hexpand: true,
+                        #[watch]
+                        set_css_classes: &model.nav_classes(AppPage::Lookup),
+                        connect_clicked[sender] => move |_| {
+                            sender.input(Msg::ShowPage(AppPage::Lookup));
+                        },
+                    },
+                    gtk::Button {
+                        set_label: "History",
+                        set_hexpand: true,
+                        #[watch]
+                        set_css_classes: &model.nav_classes(AppPage::History),
+                        connect_clicked[sender] => move |_| {
+                            sender.input(Msg::ShowPage(AppPage::History));
+                        },
+                    },
+                    gtk::Button {
+                        set_label: "Favorites",
+                        set_hexpand: true,
+                        #[watch]
+                        set_css_classes: &model.nav_classes(AppPage::Favorites),
+                        connect_clicked[sender] => move |_| {
+                            sender.input(Msg::ShowPage(AppPage::Favorites));
+                        },
+                    },
+                    gtk::Button {
+                        set_label: "Profiles",
+                        set_hexpand: true,
+                        #[watch]
+                        set_css_classes: &model.nav_classes(AppPage::Profiles),
+                        connect_clicked[sender] => move |_| {
+                            sender.input(Msg::ShowPage(AppPage::Profiles));
+                        },
                     },
                 },
             },
@@ -2446,6 +2468,16 @@ fn load_css() {
         .status-loading { opacity: 0.85; }
         .status-idle { opacity: 0.8; }
         .nav-inactive { opacity: 0.85; }
+        .bottom-nav {
+            padding: 4px 4px 6px;
+            min-height: 48px;
+        }
+        .bottom-nav-btn {
+            min-height: 44px;
+            padding: 8px 2px;
+            font-size: 0.82rem;
+            font-weight: 600;
+        }
         .library-row {
             padding: 6px 0;
             border-bottom: 1px solid alpha(@card_fg_color, 0.08);

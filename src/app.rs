@@ -42,10 +42,16 @@ pub enum Msg {
     Profiles(ui_profiles::ProfilePageEvent),
     /// Rebuild Profiles list/actions after the current update returns (avoids GTK freezes).
     RefreshProfilesUi,
+    /// Append one profile row (create/duplicate/import) without clearing the list.
+    ProfilesListAppend(String),
+    /// Remove one profile row without clearing the list.
+    ProfilesListRemove(String),
     /// Apply profile DropDown model outside a Profiles update.
     SyncProfileDropdown,
     /// In-place ●/○ / selection CSS refresh (no widget destroy).
     RelabelProfiles,
+    /// Tear down editor widgets after Save/Cancel (never from the Save button stack).
+    ClearProfileEditor,
     Rescore,
     CompareProfiles,
     ShowPage(AppPage),
@@ -131,6 +137,8 @@ pub struct AppModel {
     suppress_profile_dropdown: bool,
     /// Steps remaining for LIBREFOOD_SMOKE_SET_ACTIVE regression.
     smoke_set_active_left: Option<u32>,
+    /// Phase for LIBREFOOD_SMOKE_NEW_PROFILE: 0=fire create, 1=wait settle, then exit.
+    smoke_new_profile_phase: Option<u32>,
     smoke_tick: u32,
 }
 
@@ -390,26 +398,57 @@ fn refresh_profiles_page(
 
 fn sync_profile_dropdown(widgets: &AppModelWidgets, model: &mut AppModel) {
     model.suppress_profile_dropdown = true;
-    // Only rebuild the StringList when names/ids actually changed.
-    let n = widgets
+    let want = model.profile_names.len() as u32;
+    let names: Vec<&str> = model.profile_names.iter().map(|s| s.as_str()).collect();
+
+    // Prefer in-place StringList mutation. Replacing the DropDown model with
+    // set_model() after create has frozen the GTK main loop on Phosh/mobile.
+    match widgets
         .profile_dropdown
         .model()
-        .map(|m| m.n_items())
-        .unwrap_or(0);
-    if n != model.profile_names.len() as u32 {
-        let string_list = gtk::StringList::new(
-            &model
-                .profile_names
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>(),
-        );
-        widgets.profile_dropdown.set_model(Some(&string_list));
+        .and_then(|m| m.downcast::<gtk::StringList>().ok())
+    {
+        None => {
+            let string_list = gtk::StringList::new(&names);
+            widgets.profile_dropdown.set_model(Some(&string_list));
+        }
+        Some(list) => {
+            let n = list.n_items();
+            if n < want {
+                for name in names.iter().skip(n as usize) {
+                    list.append(name);
+                }
+            } else if n > want {
+                // Remove from the end while the kept prefix still matches.
+                let mut prefix_ok = true;
+                for i in 0..want {
+                    if list.string(i).as_deref() != Some(names[i as usize]) {
+                        prefix_ok = false;
+                        break;
+                    }
+                }
+                if prefix_ok {
+                    while list.n_items() > want {
+                        list.remove(want);
+                    }
+                } else {
+                    let string_list = gtk::StringList::new(&names);
+                    widgets.profile_dropdown.set_model(Some(&string_list));
+                }
+            } else {
+                for (i, name) in names.iter().enumerate() {
+                    if list.string(i as u32).as_deref() != Some(*name) {
+                        list.splice(i as u32, 1, &[*name]);
+                    }
+                }
+            }
+        }
     }
-    if widgets.profile_dropdown.selected() != model.active_profile_index {
+
+    if want > 0 && widgets.profile_dropdown.selected() != model.active_profile_index {
         widgets
             .profile_dropdown
-            .set_selected(model.active_profile_index);
+            .set_selected(model.active_profile_index.min(want.saturating_sub(1)));
     }
     model.suppress_profile_dropdown = false;
 }
@@ -451,7 +490,12 @@ fn handle_profiles_event(
                 "My scoring profile",
                 move |name| {
                     if let Some(name) = name {
-                        sender.input(Msg::Profiles(ProfilePageEvent::NewNamed(name)));
+                        // ask_text_async already idles once; queue again so Relm4
+                        // update never shares a stack with dialog teardown.
+                        queue_msg(
+                            &sender,
+                            Msg::Profiles(ProfilePageEvent::NewNamed(name)),
+                        );
                     }
                 },
             );
@@ -459,15 +503,20 @@ fn handle_profiles_event(
         ProfilePageEvent::NewNamed(name) => {
             match model.store.create_new(&name) {
                 Ok(created) => {
-                    // Persist + model only here. List rebuild, dropdown sync, and
-                    // editor mount must not run in this update (GTK destroy races).
-                    model.selected_profile_id = Some(created.id.clone());
+                    // Persist + model only. No editor mount, no full list clear —
+                    // those were freezing GTK after create (same class as Set active).
+                    let id = created.id.clone();
+                    model.selected_profile_id = Some(id.clone());
                     model.rebuild_profile_lists();
                     model.profiles_status =
-                        format!("Created “{}” — opening editor.", created.name);
+                        format!("Created “{}”. Tap Edit to customize.", created.name);
+                    if std::env::var("LIBREFOOD_SMOKE_NEW_PROFILE").ok().as_deref() == Some("1")
+                    {
+                        eprintln!("SMOKE_NEW_PROFILE_SAVED id={id}");
+                    }
+                    queue_msg(&sender, Msg::ProfilesListAppend(id));
+                    queue_msg(&sender, Msg::RelabelProfiles);
                     queue_msg(&sender, Msg::SyncProfileDropdown);
-                    schedule_profiles_ui_refresh(&sender);
-                    queue_msg(&sender, Msg::Profiles(ProfilePageEvent::StartEdit));
                 }
                 Err(e) => model.profiles_status = e,
             }
@@ -511,7 +560,10 @@ fn handle_profiles_event(
                 &default_name,
                 move |name| {
                     if let Some(name) = name {
-                        sender.input(Msg::Profiles(ProfilePageEvent::DuplicateNamed(name)));
+                        queue_msg(
+                            &sender,
+                            Msg::Profiles(ProfilePageEvent::DuplicateNamed(name)),
+                        );
                     }
                 },
             );
@@ -524,11 +576,13 @@ fn handle_profiles_event(
             match model.store.duplicate(&id, &name) {
                 Ok(p) => {
                     let _ = model.store.set_active(&p.id);
-                    model.selected_profile_id = Some(p.id.clone());
+                    let new_id = p.id.clone();
+                    model.selected_profile_id = Some(new_id.clone());
                     model.rebuild_profile_lists();
                     model.profiles_status = format!("Duplicated as {}", p.id);
                     queue_msg(&sender, Msg::SyncProfileDropdown);
-                    schedule_profiles_ui_refresh(&sender);
+                    queue_msg(&sender, Msg::ProfilesListAppend(new_id));
+                    queue_msg(&sender, Msg::RelabelProfiles);
                 }
                 Err(e) => model.profiles_status = e,
             }
@@ -578,18 +632,23 @@ fn handle_profiles_event(
             let sender = sender.clone();
             ui_profiles::ask_path_async(root, move |path| {
                 if let Some(path) = path {
-                    sender.input(Msg::Profiles(ProfilePageEvent::ImportPath(path)));
+                    queue_msg(
+                        &sender,
+                        Msg::Profiles(ProfilePageEvent::ImportPath(path)),
+                    );
                 }
             });
         }
         ProfilePageEvent::ImportPath(path) => match std::fs::read_to_string(path.trim()) {
             Ok(text) => match model.store.import_json(&text) {
                 Ok(p) => {
-                    model.selected_profile_id = Some(p.id.clone());
+                    let id = p.id.clone();
+                    model.selected_profile_id = Some(id.clone());
                     model.rebuild_profile_lists();
                     model.profiles_status = format!("Imported {}", p.id);
                     queue_msg(&sender, Msg::SyncProfileDropdown);
-                    schedule_profiles_ui_refresh(&sender);
+                    queue_msg(&sender, Msg::ProfilesListAppend(id));
+                    queue_msg(&sender, Msg::RelabelProfiles);
                 }
                 Err(e) => model.profiles_status = e,
             },
@@ -606,7 +665,8 @@ fn handle_profiles_event(
                     model.rebuild_profile_lists();
                     model.profiles_status = "Removed user override / custom profile.".into();
                     queue_msg(&sender, Msg::SyncProfileDropdown);
-                    schedule_profiles_ui_refresh(&sender);
+                    queue_msg(&sender, Msg::ProfilesListRemove(id));
+                    queue_msg(&sender, Msg::RelabelProfiles);
                 }
                 Err(e) => model.profiles_status = e,
             }
@@ -614,12 +674,10 @@ fn handle_profiles_event(
         ProfilePageEvent::CancelEdit => {
             model.editing_profile = false;
             model.profile_editor = None;
-            ui_profiles::clear_editor(
-                &widgets.profiles_editor_body,
-                &widgets.profiles_editor_footer,
-            );
             model.profiles_status = "Edit cancelled.".into();
-            schedule_profiles_ui_refresh(&sender);
+            queue_msg(&sender, Msg::ClearProfileEditor);
+            // List was hidden, not destroyed — relabel is enough.
+            queue_msg(&sender, Msg::RelabelProfiles);
         }
         ProfilePageEvent::SaveEdit => {
             let Some(editor) = model.profile_editor.as_ref() else {
@@ -636,13 +694,10 @@ fn handle_profiles_event(
                             model.rebuild_profile_lists();
                             model.editing_profile = false;
                             model.profile_editor = None;
-                            ui_profiles::clear_editor(
-                                &widgets.profiles_editor_body,
-                                &widgets.profiles_editor_footer,
-                            );
                             model.profiles_status = format!("Saved `{id}`.");
+                            queue_msg(&sender, Msg::ClearProfileEditor);
                             queue_msg(&sender, Msg::SyncProfileDropdown);
-                            schedule_profiles_ui_refresh(&sender);
+                            queue_msg(&sender, Msg::RelabelProfiles);
                             if model.product.is_some() {
                                 queue_msg(&sender, Msg::Rescore);
                             }
@@ -1644,6 +1699,22 @@ impl Component for AppModel {
             } else {
                 None
             },
+            // Mutually exclusive with Set-active smoke (shared tick counter).
+            smoke_new_profile_phase: if std::env::var("LIBREFOOD_SMOKE_SET_ACTIVE")
+                .ok()
+                .as_deref()
+                == Some("1")
+            {
+                None
+            } else if std::env::var("LIBREFOOD_SMOKE_NEW_PROFILE")
+                .ok()
+                .as_deref()
+                == Some("1")
+            {
+                Some(0)
+            } else {
+                None
+            },
             smoke_tick: 0,
         };
         model.rebuild_profile_lists();
@@ -1687,6 +1758,13 @@ impl Component for AppModel {
             if std::env::var("LIBREFOOD_SMOKE_SET_ACTIVE").ok().as_deref() == Some("1") {
                 eprintln!(
                     "SMOKE_SET_ACTIVE_START profiles={} page={:?}",
+                    model.store.list().len(),
+                    model.page
+                );
+            }
+            if std::env::var("LIBREFOOD_SMOKE_NEW_PROFILE").ok().as_deref() == Some("1") {
+                eprintln!(
+                    "SMOKE_NEW_PROFILE_START profiles={} page={:?}",
                     model.store.list().len(),
                     model.page
                 );
@@ -1904,8 +1982,9 @@ impl Component for AppModel {
             Msg::OpenProfilesPage => {
                 self.editing_profile = false;
                 self.profile_editor = None;
-                ui_profiles::clear_editor(&widgets.profiles_editor_body, &widgets.profiles_editor_footer);
+                queue_msg(&sender, Msg::ClearProfileEditor);
                 queue_msg(&sender, Msg::ShowPage(AppPage::Profiles));
+                schedule_profiles_ui_refresh(&sender);
             }
             Msg::Profiles(ev) => {
                 handle_profiles_event(self, widgets, root, sender.clone(), ev);
@@ -1913,14 +1992,45 @@ impl Component for AppModel {
             Msg::RefreshProfilesUi => {
                 refresh_profiles_page(widgets, self, &sender);
             }
+            Msg::ProfilesListAppend(id) => {
+                if std::env::var("LIBREFOOD_SMOKE_NEW_PROFILE").ok().as_deref() == Some("1")
+                {
+                    eprintln!("SMOKE_NEW_PROFILE_APPEND id={id}");
+                }
+                let emit = profiles_emit(&sender);
+                ui_profiles::append_profile_row_if_missing(
+                    &widgets.profiles_list,
+                    &self.store,
+                    &id,
+                    self.selected_profile_id.as_deref(),
+                    &emit,
+                );
+            }
+            Msg::ProfilesListRemove(id) => {
+                ui_profiles::remove_profile_row(&widgets.profiles_list, &id);
+            }
             Msg::SyncProfileDropdown => {
+                if std::env::var("LIBREFOOD_SMOKE_NEW_PROFILE").ok().as_deref() == Some("1")
+                {
+                    eprintln!("SMOKE_NEW_PROFILE_DROPDOWN");
+                }
                 sync_profile_dropdown(widgets, self);
             }
             Msg::RelabelProfiles => {
+                if std::env::var("LIBREFOOD_SMOKE_NEW_PROFILE").ok().as_deref() == Some("1")
+                {
+                    eprintln!("SMOKE_NEW_PROFILE_RELABEL");
+                }
                 ui_profiles::relabel_profile_list(
                     &widgets.profiles_list,
                     &self.store,
                     self.selected_profile_id.as_deref(),
+                );
+            }
+            Msg::ClearProfileEditor => {
+                ui_profiles::clear_editor(
+                    &widgets.profiles_editor_body,
+                    &widgets.profiles_editor_footer,
                 );
             }
             Msg::Rescore => {
@@ -2228,6 +2338,38 @@ impl Component for AppModel {
                             &sender,
                             Msg::Profiles(ui_profiles::ProfilePageEvent::SetActive),
                         );
+                    }
+                }
+                // Create-profile freeze smoke: NewNamed → append/relabel/dropdown,
+                // prove the main loop keeps polling afterward.
+                if let Some(phase) = self.smoke_new_profile_phase {
+                    self.smoke_tick = self.smoke_tick.wrapping_add(1);
+                    match phase {
+                        0 if self.smoke_tick > 6 => {
+                            let name = format!("Smoke Create {}", std::process::id());
+                            eprintln!("SMOKE_NEW_PROFILE_STEP create name={name}");
+                            self.smoke_new_profile_phase = Some(1);
+                            queue_msg(
+                                &sender,
+                                Msg::Profiles(ui_profiles::ProfilePageEvent::NewNamed(name)),
+                            );
+                        }
+                        1 if self.smoke_tick > 16 => {
+                            let ok_store = self.store.list().iter().any(|p| {
+                                !p.builtin && p.name.starts_with("Smoke Create")
+                            });
+                            let ok_ui = !self.editing_profile;
+                            if ok_store && ok_ui {
+                                eprintln!("SMOKE_NEW_PROFILE_OK");
+                                std::process::exit(0);
+                            }
+                            eprintln!(
+                                "SMOKE_NEW_PROFILE_FAIL store={ok_store} ui_list={ok_ui} status={}",
+                                self.profiles_status
+                            );
+                            std::process::exit(1);
+                        }
+                        _ => {}
                     }
                 }
             }

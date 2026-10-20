@@ -7,7 +7,7 @@ use crate::profiles::ProfileStore;
 use crate::product::attrs;
 use gtk::prelude::*;
 use relm4::gtk;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 const ATTR_CHOICES: &[(&str, &str)] = &[
@@ -73,6 +73,62 @@ fn profile_row_sub(id: &str, version: u32, builtin: bool) -> String {
     format!("{id} · v{version} · {kind}")
 }
 
+fn list_has_profile_row(container: &gtk::Box, id: &str) -> bool {
+    let mut child = container.first_child();
+    while let Some(widget) = child {
+        if let Some(btn) = widget.downcast_ref::<gtk::Button>() {
+            if btn.widget_name() == id {
+                return true;
+            }
+        }
+        child = widget.next_sibling();
+    }
+    false
+}
+
+fn make_profile_row_button(
+    p: &ScoringProfile,
+    active: &str,
+    selected: &str,
+    emit: &Rc<dyn Fn(ProfilePageEvent)>,
+) -> gtk::Button {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    row.set_hexpand(true);
+    row.add_css_class("profile-row");
+    if p.id == selected {
+        row.add_css_class("profile-row-selected");
+    }
+
+    let mark = if p.id == active { "●" } else { "○" };
+    let title = gtk::Label::new(Some(&profile_row_title(mark, &p.name)));
+    title.add_css_class("profile-row-title");
+    title.set_halign(gtk::Align::Start);
+    title.set_xalign(0.0);
+    title.set_wrap(true);
+
+    let sub = gtk::Label::new(Some(&profile_row_sub(&p.id, p.version, p.builtin)));
+    sub.add_css_class("dim-label");
+    sub.set_halign(gtk::Align::Start);
+    sub.set_xalign(0.0);
+    sub.set_wrap(true);
+
+    row.append(&title);
+    row.append(&sub);
+
+    let btn = gtk::Button::new();
+    btn.set_child(Some(&row));
+    btn.add_css_class("flat");
+    btn.set_hexpand(true);
+    // Widget name holds the profile id for in-place relabel.
+    btn.set_widget_name(&p.id);
+    let id = p.id.clone();
+    let emit = Rc::clone(emit);
+    btn.connect_clicked(move |_| {
+        emit(ProfilePageEvent::Select(id.clone()));
+    });
+    btn
+}
+
 /// Rebuild the selectable profile list (built-in + custom, active marked).
 pub fn rebuild_profile_list(
     container: &gtk::Box,
@@ -82,44 +138,44 @@ pub fn rebuild_profile_list(
 ) {
     clear_container(container);
     let active = store.active_id().to_string();
-    let selected = selected_id.unwrap_or(&active);
+    let selected = selected_id.unwrap_or(&active).to_string();
 
     for p in store.list() {
-        let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        row.set_hexpand(true);
-        row.add_css_class("profile-row");
-        if p.id == selected {
-            row.add_css_class("profile-row-selected");
+        container.append(&make_profile_row_button(p, &active, &selected, emit));
+    }
+}
+
+/// Append a single profile row without clearing the list (create/duplicate/import safe).
+pub fn append_profile_row_if_missing(
+    container: &gtk::Box,
+    store: &ProfileStore,
+    id: &str,
+    selected_id: Option<&str>,
+    emit: &Rc<dyn Fn(ProfilePageEvent)>,
+) {
+    if list_has_profile_row(container, id) {
+        return;
+    }
+    let Some(p) = store.get(id) else {
+        return;
+    };
+    let active = store.active_id().to_string();
+    let selected = selected_id.unwrap_or(&active).to_string();
+    container.append(&make_profile_row_button(p, &active, &selected, emit));
+}
+
+/// Remove one profile row by id without clearing the whole list.
+pub fn remove_profile_row(container: &gtk::Box, id: &str) {
+    let mut child = container.first_child();
+    while let Some(widget) = child {
+        let next = widget.next_sibling();
+        if let Some(btn) = widget.downcast_ref::<gtk::Button>() {
+            if btn.widget_name() == id {
+                container.remove(btn);
+                break;
+            }
         }
-
-        let mark = if p.id == active { "●" } else { "○" };
-        let title = gtk::Label::new(Some(&profile_row_title(mark, &p.name)));
-        title.add_css_class("profile-row-title");
-        title.set_halign(gtk::Align::Start);
-        title.set_xalign(0.0);
-        title.set_wrap(true);
-
-        let sub = gtk::Label::new(Some(&profile_row_sub(&p.id, p.version, p.builtin)));
-        sub.add_css_class("dim-label");
-        sub.set_halign(gtk::Align::Start);
-        sub.set_xalign(0.0);
-        sub.set_wrap(true);
-
-        row.append(&title);
-        row.append(&sub);
-
-        let btn = gtk::Button::new();
-        btn.set_child(Some(&row));
-        btn.add_css_class("flat");
-        btn.set_hexpand(true);
-        // Widget name holds the profile id for in-place relabel.
-        btn.set_widget_name(&p.id);
-        let id = p.id.clone();
-        let emit = Rc::clone(emit);
-        btn.connect_clicked(move |_| {
-            emit(ProfilePageEvent::Select(id.clone()));
-        });
-        container.append(&btn);
+        child = next;
     }
 }
 
@@ -497,6 +553,9 @@ fn field_label(text: &str) -> gtk::Label {
 }
 
 /// Non-blocking text prompt — never pumps/`recv` on the UI thread.
+///
+/// Critical: never `destroy()` the dialog (or run Relm4 updates) on the OK/Cancel
+/// click stack. Hide + drop modality first, then idle-destroy, then idle-callback.
 pub fn ask_text_async(
     parent: &impl IsA<gtk::Window>,
     title: &str,
@@ -536,20 +595,30 @@ pub fn ask_text_async(
     dialog.set_child(Some(&root));
 
     let done = Rc::new(RefCell::new(Some(on_done)));
+    let finishing = Rc::new(Cell::new(false));
     let finish: Rc<dyn Fn(Option<String>)> = {
         let done = Rc::clone(&done);
+        let finishing = Rc::clone(&finishing);
         let dialog = dialog.clone();
         Rc::new(move |value: Option<String>| {
-            // Take the callback before destroy — close_request may re-enter finish.
-            let cb = done.borrow_mut().take();
-            // Never run Relm4/GTK rebuilds from inside the OK/Cancel click stack
-            // (destroying this dialog or mounting the editor there freezes/crashes).
-            dialog.destroy();
-            if let Some(cb) = cb {
-                gtk::glib::idle_add_local_once(move || {
-                    cb(value);
-                });
+            if finishing.replace(true) {
+                return;
             }
+            let cb = done.borrow_mut().take();
+            // Soft-close on the click stack only — release grab, keep widgets alive
+            // until after the signal returns (destroy-from-clicked freezes GTK).
+            dialog.set_modal(false);
+            dialog.set_visible(false);
+            let dialog = dialog.clone();
+            gtk::glib::idle_add_local_once(move || {
+                dialog.destroy();
+                // Second idle: app work runs only after destroy has left the stack.
+                gtk::glib::idle_add_local_once(move || {
+                    if let Some(cb) = cb {
+                        cb(value);
+                    }
+                });
+            });
         })
     };
 
@@ -569,7 +638,8 @@ pub fn ask_text_async(
         let finish = Rc::clone(&finish);
         move |_| {
             finish(None);
-            gtk::glib::Propagation::Proceed
+            // Stop default destroy — we own teardown on the idle path.
+            gtk::glib::Propagation::Stop
         }
     });
     entry.connect_activate({

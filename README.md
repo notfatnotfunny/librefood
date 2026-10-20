@@ -48,9 +48,9 @@ Window minimum width is ~360px; the input row stacks vertically on narrow widths
 
 1. **Type or paste** a barcode (digits only; spaces are stripped) and press **Look up**, or **Search** by product name.
 2. Or click **Scan with camera** — live preview with a centering guide; **Cancel scan** stops capture.
-3. Pick a **scoring profile** in the dropdown (or **Manage profiles…** to duplicate/edit/import/export JSON).
+3. Pick a **scoring profile** in the dropdown (or **Manage profiles…** → **New profile…** / duplicate / edit / import / export).
 4. Results show image, Librefood score, Negatives/Positives, and **calculation steps**. **Compare** scores the same product under every profile.
-5. Profiles live in `~/.config/librefood/profiles/`. Built-in examples: nutritional quality, minimally processed, additive-conscious, environmental impact, blank.
+5. Custom profiles are saved as JSON in `~/.config/librefood/profiles/`. Built-in examples: nutritional quality, minimally processed, additive-conscious, environmental impact, blank.
 
 ### Example barcodes
 

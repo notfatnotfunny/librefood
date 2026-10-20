@@ -93,12 +93,12 @@ sudo pacman -S libcamera gst-plugin-libcamera pipewire
 | `LIBREFOOD_CAMERA_ROTATE=auto` | Upright preview/decode: `auto` (default), or `0` / `90` / `180` / `270` (CW) |
 | `LIBREFOOD_CAMERA_MIRROR=auto` | Mirror after rotate: `auto` (front only), `1`, or `0` |
 
-On fajita (multiple cams), default is **back** (largest back area). Preview RGB is uprighted for portrait phones (sensor/`api.libcamera.rotation` when present, else **270° CW** / 90° CCW on CAMSS landscape frames) before GTK Picture **and** barcode decode. **Switch camera** cycles **Back → Wide → Front → …** (CAMSS V4L junk filtered). Last choice: `~/.config/librefood/camera-id`.
+On fajita (multiple cams), default is **back** (largest back area). Preview RGB is uprighted **270° CW** on CAMSS/landscape phone frames (same as `LIBREFOOD_CAMERA_ROTATE=270`) before GTK Picture **and** barcode decode; desktop/USB stays **0°** unless overridden. **Switch camera** cycles **Back → Wide → Front → …**. Last choice: `~/.config/librefood/camera-id`.
 
 ```bash
 LIBREFOOD_CAMERA_DEBUG=1 ./target/release/librefood
-# if preview is still wrong: LIBREFOOD_CAMERA_ROTATE=90  # or 0 / 180 / 270
-# or: LIBREFOOD_CAMERA_NAME='<object.serial from gst-device-monitor>'
+# expect log: orientation rot=270 … reason=camss-landscape
+# override: LIBREFOOD_CAMERA_ROTATE=0|90|180|270
 ```
 
 Typed barcodes always work. Window placement follows Fractal/Snapshot patterns: phones (Phosh / ≤1080p short edge, e.g. fajita) **maximize** into the shell workarea; desktops open a floating ~800×640 window (resizable). Escape force-maximize: `LIBREFOOD_NO_FULLSCREEN=1`.

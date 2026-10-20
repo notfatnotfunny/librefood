@@ -1190,7 +1190,7 @@ fn rotate_rgb_cw(width: u32, height: u32, rgb: &[u8], degrees: u16) -> (u32, u32
             (width, height, out)
         }
         90 => {
-            // (x,y) → (h-1-y, x); new size h×w
+            // Clockwise 90°: (x,y) → (h-1-y, x); output size h×w.
             let (nw, nh) = (height, width);
             let mut out = vec![0u8; need];
             for y in 0..height {
@@ -1205,7 +1205,8 @@ fn rotate_rgb_cw(width: u32, height: u32, rgb: &[u8], degrees: u16) -> (u32, u32
             (nw, nh, out)
         }
         270 => {
-            // (x,y) → (y, w-1-x); new size h×w
+            // Clockwise 270° (= CCW 90°): (x,y) → (y, w-1-x); output size h×w.
+            // Kept as its own mapping (not “same as 90”) — verified distinct in tests.
             let (nw, nh) = (height, width);
             let mut out = vec![0u8; need];
             for y in 0..height {
@@ -1241,14 +1242,15 @@ fn orient_rgb_frame(
             front: false,
         });
 
+    // Order matters: fajita DeviceMonitor often reports a sensor rotation that
+    // is *not* the uprighting angle (`LIBREFOOD_CAMERA_ROTATE=270` worked while
+    // auto used `sensor` and stayed wrong). CAMSS landscape must win over sensor.
     let (degrees, reason) = if let Some(d) = env_rotate_degrees() {
         (d, "env")
+    } else if phone_camss && width > height {
+        (270, "camss-landscape")
     } else if let Some(sr) = hint.sensor_rotation {
         (normalize_quarter_turns(sr), "sensor")
-    } else if phone_camss && width > height {
-        // Landscape buffers on portrait phones (fajita): 90° CW left the image
-        // upside-down; 270° CW (= 90° CCW) matches the sensor mount.
-        (270, "camss-landscape")
     } else {
         (0, "none")
     };
@@ -1728,6 +1730,30 @@ mod tests {
         let (w2, h2, back) = rotate_rgb_cw(w, h, &out, 270);
         assert_eq!((w2, h2), (2, 1));
         assert_eq!(back, rgb);
+    }
+
+    #[test]
+    fn rotate_90_and_270_are_distinct() {
+        // 2×2 unique colors — 90 must not equal 270 (buggy 270==90 caused fajita thrash).
+        let rgb = vec![
+            1, 0, 0, // A
+            0, 1, 0, // B
+            0, 0, 1, // C
+            1, 1, 0, // D
+        ];
+        let (_, _, r90) = rotate_rgb_cw(2, 2, &rgb, 90);
+        let (_, _, r270) = rotate_rgb_cw(2, 2, &rgb, 270);
+        let (_, _, r180) = rotate_rgb_cw(2, 2, &rgb, 180);
+        assert_ne!(r90, r270);
+        assert_ne!(r90, r180);
+        assert_ne!(r270, r180);
+        // 90 three times == 270; 90 then 180 == 270.
+        let (w, h, t1) = rotate_rgb_cw(2, 2, &rgb, 90);
+        let (w, h, t2) = rotate_rgb_cw(w, h, &t1, 90);
+        let (_, _, t3) = rotate_rgb_cw(w, h, &t2, 90);
+        assert_eq!(t3, r270);
+        let (_, _, via180) = rotate_rgb_cw(2, 2, &r90, 180);
+        assert_eq!(via180, r270);
     }
 
     #[test]

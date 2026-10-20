@@ -1606,6 +1606,7 @@ name = "librefood"
 version = "0.2.0"
 dependencies = [
  "image",
+ "libc",
  "relm4",
  "reqwest",
  "rxing",

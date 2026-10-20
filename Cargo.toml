@@ -3,7 +3,7 @@ name = "librefood"
 version = "0.2.0"
 edition = "2021"
 description = "Librefood — configurable food scores from Open Food Facts"
-license = "MIT"
+license = "GPL-3.0-or-later"
 readme = "README.md"
 
 [dependencies]

@@ -35,16 +35,19 @@ Same list: [`alpine-dependencies.txt`](alpine-dependencies.txt).
 
 ## Camera
 
-Needs a V4L2 device (`/dev/video*`) and `video` group access:
+Needs a **capture-capable** V4L2 node (`V4L2_CAP_VIDEO_CAPTURE` — metadata-only `/dev/video*` are skipped) and `video` group access:
 
 ```bash
 ls -l /dev/video*
 groups   # should include `video`
 # Alpine: sudo adduser $USER video   # then log out / in
-LIBREFOOD_CAMERA_DEBUG=1 ./target/release/librefood   # stderr probe details
+LIBREFOOD_CAMERA_DEBUG=1 ./target/release/librefood
+# optional: LIBREFOOD_CAMERA_DEVICE=/dev/video0
 ```
 
-If no camera is present the Scan button stays disabled; when a device exists Scan stays enabled and open errors show at click time. Typed barcodes always work.
+Optional portal stack (GNOME Snapshot-style; not required on Alpine if V4L2 works): `xdg-desktop-portal`, a desktop portal impl, `pipewire`. Librefood still captures via V4L2.
+
+Typed barcodes always work. Window starts fullscreen/maximized; `LIBREFOOD_NO_FULLSCREEN=1` to disable.
 
 ## License
 

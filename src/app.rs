@@ -1587,40 +1587,64 @@ impl Component for AppModel {
                     set_hexpand: true,
                     add_css_class: "bottom-nav",
 
+                    #[name = "nav_search"]
                     gtk::Button {
-                        set_label: "Search",
+                        set_tooltip_text: Some("Search"),
                         set_hexpand: true,
+                        set_can_focus: true,
                         #[watch]
                         set_css_classes: &model.nav_classes(AppPage::Lookup),
                         connect_clicked[sender] => move |_| {
                             sender.input(Msg::ShowPage(AppPage::Lookup));
                         },
+                        gtk::Image {
+                            set_icon_name: Some(crate::nav_icons::SEARCH),
+                            set_pixel_size: crate::nav_icons::PIXEL_SIZE,
+                        },
                     },
+                    #[name = "nav_history"]
                     gtk::Button {
-                        set_label: "History",
+                        set_tooltip_text: Some("History"),
                         set_hexpand: true,
+                        set_can_focus: true,
                         #[watch]
                         set_css_classes: &model.nav_classes(AppPage::History),
                         connect_clicked[sender] => move |_| {
                             sender.input(Msg::ShowPage(AppPage::History));
                         },
+                        gtk::Image {
+                            set_icon_name: Some(crate::nav_icons::HISTORY),
+                            set_pixel_size: crate::nav_icons::PIXEL_SIZE,
+                        },
                     },
+                    #[name = "nav_favorites"]
                     gtk::Button {
-                        set_label: "Favorites",
+                        set_tooltip_text: Some("Favorites"),
                         set_hexpand: true,
+                        set_can_focus: true,
                         #[watch]
                         set_css_classes: &model.nav_classes(AppPage::Favorites),
                         connect_clicked[sender] => move |_| {
                             sender.input(Msg::ShowPage(AppPage::Favorites));
                         },
+                        gtk::Image {
+                            set_icon_name: Some(crate::nav_icons::FAVORITES),
+                            set_pixel_size: crate::nav_icons::PIXEL_SIZE,
+                        },
                     },
+                    #[name = "nav_profiles"]
                     gtk::Button {
-                        set_label: "Profiles",
+                        set_tooltip_text: Some("Profiles"),
                         set_hexpand: true,
+                        set_can_focus: true,
                         #[watch]
                         set_css_classes: &model.nav_classes(AppPage::Profiles),
                         connect_clicked[sender] => move |_| {
                             sender.input(Msg::ShowPage(AppPage::Profiles));
+                        },
+                        gtk::Image {
+                            set_icon_name: Some(crate::nav_icons::PROFILES),
+                            set_pixel_size: crate::nav_icons::PIXEL_SIZE,
                         },
                     },
                 },
@@ -1720,9 +1744,26 @@ impl Component for AppModel {
         model.rebuild_profile_lists();
         model.selected_profile_id = Some(model.store.active_id().to_string());
 
+        // Register bundled nav SVGs before the bottom bar resolves icon names.
+        crate::nav_icons::install();
         let widgets = view_output!();
         load_css();
         logo::apply_window_icon(&root);
+        {
+            use gtk::accessible::Property;
+            widgets
+                .nav_search
+                .update_property(&[Property::Label("Search")]);
+            widgets
+                .nav_history
+                .update_property(&[Property::Label("History")]);
+            widgets
+                .nav_favorites
+                .update_property(&[Property::Label("Favorites")]);
+            widgets
+                .nav_profiles
+                .update_property(&[Property::Label("Profiles")]);
+        }
         apply_window_placement(&root);
         // Wayland/Phosh often ignore maximize until the surface is mapped —
         // re-apply on map and once shortly after (same as before).
@@ -2722,21 +2763,20 @@ fn load_css() {
         .status-idle { opacity: 0.8; }
         .bottom-nav {
             padding: 4px 4px 6px;
-            min-height: 48px;
+            min-height: 52px;
         }
         .bottom-nav-btn {
-            min-height: 44px;
-            padding: 8px 2px;
-            font-size: 0.82rem;
-            font-weight: 600;
+            min-height: 48px;
+            min-width: 48px;
+            padding: 10px 2px;
             border-radius: 8px;
-            /* Keep label = window fg so press/active never vanish into the bar. */
+            /* Symbolic icons recolor from this (Adwaita fg). */
             color: alpha(@window_fg_color, 0.78);
             background-color: transparent;
             opacity: 1;
         }
-        .bottom-nav-btn label {
-            color: inherit;
+        .bottom-nav-btn image {
+            -gtk-icon-filter: none;
         }
         .bottom-nav-btn:hover {
             color: @window_fg_color;
@@ -2747,12 +2787,11 @@ fn load_css() {
             background-color: alpha(@window_fg_color, 0.16);
         }
         .bottom-nav-idle {
-            opacity: 0.72;
-            font-weight: 500;
+            opacity: 0.70;
+            color: alpha(@window_fg_color, 0.70);
         }
-        /* Minimal active mark — weight/opacity only, no border or filled box. */
+        /* Minimal active mark — opacity/color only, no border or filled box. */
         .bottom-nav-active {
-            font-weight: 700;
             color: @window_fg_color;
             background-color: transparent;
             opacity: 1;

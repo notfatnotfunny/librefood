@@ -1,4 +1,4 @@
-//! Imperative GTK dialogs for scoring-profile management.
+//! In-page scoring-profile list + scrollable editor (narrow-screen friendly).
 
 use crate::engine::{
     Criterion, FactorPolarity, MissingDataPolicy, ScoringProfile, ThresholdRule, Tone, When,
@@ -25,529 +25,174 @@ const ATTR_CHOICES: &[(&str, &str)] = &[
     (attrs::ALLERGEN_COUNT, "Allergen tag count"),
 ];
 
-pub struct ProfileDialogResult {
-    pub active_id: String,
-    pub store_changed: bool,
+/// Events emitted by the Profiles page widgets.
+#[derive(Debug, Clone)]
+pub enum ProfilePageEvent {
+    Select(String),
+    New,
+    SetActive,
+    Duplicate,
+    StartEdit,
+    Export,
+    Import,
+    Delete,
+    RestoreBuiltins,
+    CancelEdit,
+    SaveEdit,
 }
 
-fn pump_until(rx: &std::sync::mpsc::Receiver<()>) {
-    while rx.try_recv().is_err() {
-        while gtk::glib::MainContext::default().iteration(false) {}
-        std::thread::sleep(std::time::Duration::from_millis(16));
-    }
+/// Collects the edited profile from mounted editor widgets.
+pub struct EditorHandle {
+    collect: Rc<dyn Fn() -> Result<ScoringProfile, String>>,
 }
 
-/// Pump the GTK main loop until a modal channel yields a value.
-fn recv_modal<T>(rx: &std::sync::mpsc::Receiver<T>) -> T {
-    loop {
-        if let Ok(v) = rx.try_recv() {
-            return v;
-        }
-        while gtk::glib::MainContext::default().iteration(false) {}
-        std::thread::sleep(std::time::Duration::from_millis(16));
-    }
-}
-
-/// List / activate / duplicate / delete / import / export / edit profiles.
-pub fn run_manage_dialog(
-    parent: &impl IsA<gtk::Window>,
-    store: &mut ProfileStore,
-) -> ProfileDialogResult {
-    let dialog = gtk::Window::builder()
-        .title("Scoring profiles")
-        .transient_for(parent)
-        .modal(true)
-        .default_width(540)
-        .default_height(580)
-        .build();
-
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    root.set_margin_top(16);
-    root.set_margin_bottom(16);
-    root.set_margin_start(16);
-    root.set_margin_end(16);
-
-    let hint = gtk::Label::new(Some(
-        "Declarative JSON profiles — not medical advice. Duplicate a built-in to customize.",
-    ));
-    hint.add_css_class("dim-label");
-    hint.set_wrap(true);
-    hint.set_xalign(0.0);
-    root.append(&hint);
-
-    let engine_notes = gtk::Expander::new(Some("How scoring works"));
-    let notes_lab = gtk::Label::new(Some(crate::engine::ENGINE_NOTES.trim()));
-    notes_lab.add_css_class("dim-label");
-    notes_lab.set_wrap(true);
-    notes_lab.set_xalign(0.0);
-    notes_lab.set_selectable(true);
-    engine_notes.set_child(Some(&notes_lab));
-    root.append(&engine_notes);
-
-    let list = gtk::ListBox::new();
-    list.set_selection_mode(gtk::SelectionMode::Single);
-    list.add_css_class("boxed-list");
-    let scroll = gtk::ScrolledWindow::builder()
-        .vexpand(true)
-        .hexpand(true)
-        .child(&list)
-        .build();
-    root.append(&scroll);
-
-    let id_order: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-
-    let refresh = {
-        let list = list.clone();
-        let id_order = Rc::clone(&id_order);
-        move |store: &ProfileStore| {
-            while let Some(c) = list.first_child() {
-                list.remove(&c);
-            }
-            let mut ids = Vec::new();
-            let active = store.active_id().to_string();
-            for (i, p) in store.list().iter().enumerate() {
-                let row = gtk::ListBoxRow::new();
-                let mark = if p.id == active { "● " } else { "○ " };
-                let builtin = if p.builtin { " (built-in)" } else { "" };
-                let label = gtk::Label::new(Some(&format!(
-                    "{mark}{} — {} v{}{builtin}",
-                    p.name, p.id, p.version
-                )));
-                label.set_xalign(0.0);
-                label.set_hexpand(true);
-                row.set_child(Some(&label));
-                list.append(&row);
-                if p.id == active {
-                    list.select_row(Some(&row));
-                }
-                ids.push(p.id.clone());
-                let _ = i;
-            }
-            *id_order.borrow_mut() = ids;
-        }
-    };
-    refresh(store);
-
-    let selected_id = {
-        let list = list.clone();
-        let id_order = Rc::clone(&id_order);
-        move || -> Option<String> {
-            let row = list.selected_row()?;
-            let idx = row.index();
-            if idx < 0 {
-                return None;
-            }
-            id_order.borrow().get(idx as usize).cloned()
-        }
-    };
-
-    let btn_row = gtk::FlowBox::new();
-    btn_row.set_max_children_per_line(4);
-    btn_row.set_selection_mode(gtk::SelectionMode::None);
-    let btn_new = gtk::Button::with_label("New profile…");
-    btn_new.add_css_class("suggested-action");
-    let btn_active = gtk::Button::with_label("Set active");
-    let btn_dup = gtk::Button::with_label("Duplicate");
-    let btn_edit = gtk::Button::with_label("Edit…");
-    let btn_export = gtk::Button::with_label("Export JSON");
-    let btn_import = gtk::Button::with_label("Import JSON");
-    let btn_delete = gtk::Button::with_label("Delete override");
-    let btn_restore = gtk::Button::with_label("Restore built-ins");
-    let btn_close = gtk::Button::with_label("Close");
-    for b in [
-        &btn_new,
-        &btn_active,
-        &btn_dup,
-        &btn_edit,
-        &btn_export,
-        &btn_import,
-        &btn_delete,
-        &btn_restore,
-        &btn_close,
-    ] {
-        btn_row.append(b);
-    }
-    root.append(&btn_row);
-
-    let status = gtk::Label::new(None);
-    status.set_xalign(0.0);
-    status.add_css_class("dim-label");
-    root.append(&status);
-    dialog.set_child(Some(&root));
-
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let changed = Rc::new(std::cell::Cell::new(false));
-    // Safety: dialog is modal and store lives for the dialog lifetime on the same thread.
-    let store_ptr = store as *mut ProfileStore;
-
-    {
-        let refresh = refresh.clone();
-        let status = status.clone();
-        let changed = Rc::clone(&changed);
-        let dialog = dialog.clone();
-        btn_new.connect_clicked(move |_| {
-            let store = unsafe { &mut *store_ptr };
-            let Some(name) = ask_text_dialog(
-                &dialog,
-                "New scoring profile",
-                "Name",
-                "My scoring profile",
-            ) else {
-                return;
-            };
-            match store.create_new(&name) {
-                Ok(created) => {
-                    changed.set(true);
-                    // Offer immediate edit of weights / thresholds.
-                    let to_edit = store.get(&created.id).cloned().unwrap_or(created.clone());
-                    if let Some(edited) = edit_profile_dialog(&dialog, to_edit) {
-                        match store.save(edited) {
-                            Ok(()) => status.set_text(&format!(
-                                "Created and saved “{}” ({}).",
-                                name, created.id
-                            )),
-                            Err(e) => status.set_text(&format!(
-                                "Created {}, but save after edit failed: {e}",
-                                created.id
-                            )),
-                        }
-                    } else {
-                        status.set_text(&format!(
-                            "Created “{}” ({}) — saved under ~/.config/librefood/profiles/",
-                            name, created.id
-                        ));
-                    }
-                    let _ = store.set_active(&created.id);
-                    refresh(store);
-                }
-                Err(e) => status.set_text(&e),
-            }
-        });
-    }
-    {
-        let refresh = refresh.clone();
-        let selected_id = selected_id.clone();
-        let status = status.clone();
-        let changed = Rc::clone(&changed);
-        btn_active.connect_clicked(move |_| {
-            let store = unsafe { &mut *store_ptr };
-            if let Some(id) = selected_id() {
-                match store.set_active(&id) {
-                    Ok(()) => {
-                        changed.set(true);
-                        refresh(store);
-                        status.set_text(&format!("Active: {id}"));
-                    }
-                    Err(e) => status.set_text(&e),
-                }
-            }
-        });
-    }
-    {
-        let refresh = refresh.clone();
-        let selected_id = selected_id.clone();
-        let status = status.clone();
-        let changed = Rc::clone(&changed);
-        btn_dup.connect_clicked(move |_| {
-            let store = unsafe { &mut *store_ptr };
-            if let Some(id) = selected_id() {
-                let name = format!(
-                    "{} (copy)",
-                    store.get(&id).map(|p| p.name.as_str()).unwrap_or("Profile")
-                );
-                match store.duplicate(&id, &name) {
-                    Ok(p) => {
-                        let _ = store.set_active(&p.id);
-                        changed.set(true);
-                        refresh(store);
-                        status.set_text(&format!("Duplicated as {}", p.id));
-                    }
-                    Err(e) => status.set_text(&e),
-                }
-            }
-        });
-    }
-    {
-        let refresh = refresh.clone();
-        let selected_id = selected_id.clone();
-        let status = status.clone();
-        let changed = Rc::clone(&changed);
-        let dialog = dialog.clone();
-        btn_edit.connect_clicked(move |_| {
-            let store = unsafe { &mut *store_ptr };
-            if let Some(id) = selected_id() {
-                if let Some(profile) = store.get(&id).cloned() {
-                    if let Some(edited) = edit_profile_dialog(&dialog, profile) {
-                        match store.save(edited) {
-                            Ok(()) => {
-                                changed.set(true);
-                                refresh(store);
-                                status.set_text("Profile saved.");
-                            }
-                            Err(e) => status.set_text(&e),
-                        }
-                    }
-                }
-            }
-        });
-    }
-    {
-        let selected_id = selected_id.clone();
-        let status = status.clone();
-        let dialog = dialog.clone();
-        btn_export.connect_clicked(move |_| {
-            let store = unsafe { &*store_ptr };
-            if let Some(id) = selected_id() {
-                match store.export_json(&id) {
-                    Ok(json) => {
-                        let path = store.root().join(format!("{id}-export.json"));
-                        match std::fs::write(&path, json) {
-                            Ok(()) => status.set_text(&format!("Wrote {}", path.display())),
-                            Err(e) => status.set_text(&e.to_string()),
-                        }
-                        let _ = &dialog;
-                    }
-                    Err(e) => status.set_text(&e),
-                }
-            }
-        });
-    }
-    {
-        let refresh = refresh.clone();
-        let status = status.clone();
-        let changed = Rc::clone(&changed);
-        let dialog = dialog.clone();
-        btn_import.connect_clicked(move |_| {
-            let store = unsafe { &mut *store_ptr };
-            // Simple import: paste path via Entry dialog
-            let ask = gtk::Window::builder()
-                .title("Import profile JSON")
-                .transient_for(&dialog)
-                .modal(true)
-                .default_width(420)
-                .build();
-            let box_ = gtk::Box::new(gtk::Orientation::Vertical, 8);
-            box_.set_margin_top(12);
-            box_.set_margin_bottom(12);
-            box_.set_margin_start(12);
-            box_.set_margin_end(12);
-            let entry = gtk::Entry::builder()
-                .placeholder_text("Absolute path to .json")
-                .hexpand(true)
-                .build();
-            let ok = gtk::Button::with_label("Import");
-            ok.add_css_class("suggested-action");
-            box_.append(&entry);
-            box_.append(&ok);
-            ask.set_child(Some(&box_));
-            let (txi, rxi) = std::sync::mpsc::channel::<Option<String>>();
-            ok.connect_clicked({
-                let ask = ask.clone();
-                let entry = entry.clone();
-                let txi = txi.clone();
-                move |_| {
-                    let _ = txi.send(Some(entry.text().to_string()));
-                    ask.close();
-                }
-            });
-            ask.connect_close_request({
-                let txi = txi.clone();
-                move |_| {
-                    let _ = txi.send(None);
-                    gtk::glib::Propagation::Proceed
-                }
-            });
-            ask.present();
-            let path = recv_modal(&rxi);
-            ask.destroy();
-            if let Some(path) = path {
-                match std::fs::read_to_string(path.trim()) {
-                    Ok(text) => match store.import_json(&text) {
-                        Ok(p) => {
-                            changed.set(true);
-                            refresh(store);
-                            status.set_text(&format!("Imported {}", p.id));
-                        }
-                        Err(e) => status.set_text(&e),
-                    },
-                    Err(e) => status.set_text(&e.to_string()),
-                }
-            }
-        });
-    }
-    {
-        let refresh = refresh.clone();
-        let selected_id = selected_id.clone();
-        let status = status.clone();
-        let changed = Rc::clone(&changed);
-        btn_delete.connect_clicked(move |_| {
-            let store = unsafe { &mut *store_ptr };
-            if let Some(id) = selected_id() {
-                match store.delete(&id) {
-                    Ok(()) => {
-                        changed.set(true);
-                        refresh(store);
-                        status.set_text("Removed user override / custom profile.");
-                    }
-                    Err(e) => status.set_text(&e),
-                }
-            }
-        });
-    }
-    {
-        let refresh = refresh.clone();
-        let status = status.clone();
-        let changed = Rc::clone(&changed);
-        btn_restore.connect_clicked(move |_| {
-            let store = unsafe { &mut *store_ptr };
-            match store.restore_builtins() {
-                Ok(()) => {
-                    changed.set(true);
-                    refresh(store);
-                    status.set_text(
-                        "Built-in profiles restored from embedded defaults (user customs kept).",
-                    );
-                }
-                Err(e) => status.set_text(&e),
-            }
-        });
-    }
-
-    btn_close.connect_clicked({
-        let dialog = dialog.clone();
-        let tx = tx.clone();
-        move |_| {
-            dialog.close();
-            let _ = tx.send(());
-        }
-    });
-    dialog.connect_close_request({
-        let tx = tx.clone();
-        move |_| {
-            let _ = tx.send(());
-            gtk::glib::Propagation::Proceed
-        }
-    });
-
-    dialog.present();
-    pump_until(&rx);
-    dialog.destroy();
-
-    ProfileDialogResult {
-        active_id: store.active_id().to_string(),
-        store_changed: changed.get(),
+impl EditorHandle {
+    pub fn collect(&self) -> Result<ScoringProfile, String> {
+        (self.collect)()
     }
 }
 
-fn ask_text_dialog(
-    parent: &impl IsA<gtk::Window>,
-    title: &str,
-    label: &str,
-    initial: &str,
-) -> Option<String> {
-    let dialog = gtk::Window::builder()
-        .title(title)
-        .transient_for(parent)
-        .modal(true)
-        .default_width(400)
-        .build();
-    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    box_.set_margin_top(14);
-    box_.set_margin_bottom(14);
-    box_.set_margin_start(14);
-    box_.set_margin_end(14);
-    box_.append(&gtk::Label::new(Some(label)));
-    let entry = gtk::Entry::builder()
-        .text(initial)
-        .hexpand(true)
-        .activates_default(true)
-        .build();
-    box_.append(&entry);
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let ok = gtk::Button::with_label("Create");
-    ok.add_css_class("suggested-action");
-    let cancel = gtk::Button::with_label("Cancel");
-    row.append(&ok);
-    row.append(&cancel);
-    box_.append(&row);
-    dialog.set_child(Some(&box_));
-
-    let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
-    ok.connect_clicked({
-        let dialog = dialog.clone();
-        let entry = entry.clone();
-        let tx = tx.clone();
-        move |_| {
-            let text = entry.text().trim().to_string();
-            let _ = tx.send(if text.is_empty() { None } else { Some(text) });
-            dialog.close();
-        }
-    });
-    entry.connect_activate({
-        let dialog = dialog.clone();
-        let entry = entry.clone();
-        let tx = tx.clone();
-        move |_| {
-            let text = entry.text().trim().to_string();
-            let _ = tx.send(if text.is_empty() { None } else { Some(text) });
-            dialog.close();
-        }
-    });
-    cancel.connect_clicked({
-        let dialog = dialog.clone();
-        let tx = tx.clone();
-        move |_| {
-            let _ = tx.send(None);
-            dialog.close();
-        }
-    });
-    dialog.connect_close_request({
-        let tx = tx.clone();
-        move |_| {
-            let _ = tx.send(None);
-            gtk::glib::Propagation::Proceed
-        }
-    });
-
-    dialog.present();
-    entry.grab_focus();
-    let result = recv_modal(&rx);
-    dialog.destroy();
-    result
+fn clear_container(container: &gtk::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
 }
 
-fn edit_profile_dialog(
-    parent: &impl IsA<gtk::Window>,
+/// Rebuild the selectable profile list (built-in + custom, active marked).
+pub fn rebuild_profile_list(
+    container: &gtk::Box,
+    store: &ProfileStore,
+    selected_id: Option<&str>,
+    emit: &Rc<dyn Fn(ProfilePageEvent)>,
+) {
+    clear_container(container);
+    let active = store.active_id().to_string();
+    let selected = selected_id.unwrap_or(&active);
+
+    for p in store.list() {
+        let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        row.set_hexpand(true);
+        row.add_css_class("profile-row");
+        if p.id == selected {
+            row.add_css_class("profile-row-selected");
+        }
+
+        let mark = if p.id == active { "●" } else { "○" };
+        let kind = if p.builtin { "built-in" } else { "custom" };
+        let title = gtk::Label::new(Some(&format!("{mark}  {}", p.name)));
+        title.add_css_class("profile-row-title");
+        title.set_halign(gtk::Align::Start);
+        title.set_xalign(0.0);
+        title.set_wrap(true);
+
+        let sub = gtk::Label::new(Some(&format!("{} · v{} · {kind}", p.id, p.version)));
+        sub.add_css_class("dim-label");
+        sub.set_halign(gtk::Align::Start);
+        sub.set_xalign(0.0);
+        sub.set_wrap(true);
+
+        row.append(&title);
+        row.append(&sub);
+
+        let btn = gtk::Button::new();
+        btn.set_child(Some(&row));
+        btn.add_css_class("flat");
+        btn.set_hexpand(true);
+        let id = p.id.clone();
+        let emit = Rc::clone(emit);
+        btn.connect_clicked(move |_| {
+            emit(ProfilePageEvent::Select(id.clone()));
+        });
+        container.append(&btn);
+    }
+}
+
+/// Mount New / Duplicate / … action buttons into `actions`.
+pub fn rebuild_profile_actions(actions: &gtk::Box, emit: &Rc<dyn Fn(ProfilePageEvent)>) {
+    clear_container(actions);
+    actions.set_orientation(gtk::Orientation::Vertical);
+    actions.set_spacing(8);
+
+    let flow = gtk::FlowBox::new();
+    // 2-up wraps cleanly from ~360px; avoids clipped third columns on phones.
+    flow.set_max_children_per_line(2);
+    flow.set_min_children_per_line(1);
+    flow.set_selection_mode(gtk::SelectionMode::None);
+    flow.set_homogeneous(true);
+    flow.set_column_spacing(6);
+    flow.set_row_spacing(6);
+    flow.set_hexpand(true);
+
+    let buttons: &[(&str, ProfilePageEvent, bool)] = &[
+        ("New", ProfilePageEvent::New, true),
+        ("Set active", ProfilePageEvent::SetActive, false),
+        ("Duplicate", ProfilePageEvent::Duplicate, false),
+        ("Edit", ProfilePageEvent::StartEdit, false),
+        ("Export JSON", ProfilePageEvent::Export, false),
+        ("Import JSON", ProfilePageEvent::Import, false),
+        ("Delete", ProfilePageEvent::Delete, false),
+        ("Restore built-ins", ProfilePageEvent::RestoreBuiltins, false),
+    ];
+
+    for (label, event, suggested) in buttons {
+        let btn = gtk::Button::with_label(label);
+        if *suggested {
+            btn.add_css_class("suggested-action");
+        }
+        let emit = Rc::clone(emit);
+        let event = event.clone();
+        btn.connect_clicked(move |_| emit(event.clone()));
+        flow.append(&btn);
+    }
+    actions.append(&flow);
+}
+
+/// Mount a full-page scrollable editor into `body`, sticky Save/Cancel into `footer`.
+pub fn mount_profile_editor(
+    body: &gtk::Box,
+    footer: &gtk::Box,
     mut profile: ScoringProfile,
-) -> Option<ScoringProfile> {
+    emit: &Rc<dyn Fn(ProfilePageEvent)>,
+) -> EditorHandle {
+    clear_container(body);
+    clear_container(footer);
+
     if profile.builtin {
         profile.id = format!("{}-custom", profile.id);
         profile.name = format!("{} (custom)", profile.name);
         profile.builtin = false;
     }
 
-    let dialog = gtk::Window::builder()
-        .title("Edit scoring profile")
-        .transient_for(parent)
-        .modal(true)
-        .default_width(560)
-        .default_height(640)
-        .build();
+    body.set_orientation(gtk::Orientation::Vertical);
+    body.set_spacing(12);
+    body.set_margin_top(4);
+    body.set_margin_bottom(8);
+    body.set_margin_start(2);
+    body.set_margin_end(2);
 
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    root.set_margin_top(12);
-    root.set_margin_bottom(12);
-    root.set_margin_start(12);
-    root.set_margin_end(12);
+    let heading = gtk::Label::new(Some("Edit profile"));
+    heading.add_css_class("brand-title");
+    heading.set_halign(gtk::Align::Start);
+    heading.set_xalign(0.0);
+    body.append(&heading);
 
-    let name = gtk::Entry::builder().text(&profile.name).build();
-    root.append(&gtk::Label::new(Some("Name")));
-    root.append(&name);
+    let id_lab = gtk::Label::new(Some(&format!("id · {}", profile.id)));
+    id_lab.add_css_class("dim-label");
+    id_lab.set_halign(gtk::Align::Start);
+    id_lab.set_xalign(0.0);
+    id_lab.set_selectable(true);
+    body.append(&id_lab);
+
+    let name = gtk::Entry::builder().text(&profile.name).hexpand(true).build();
+    name.set_placeholder_text(Some("Profile name"));
+    body.append(&field_label("Name"));
+    body.append(&name);
 
     let base = gtk::SpinButton::with_range(0.0, 100.0, 1.0);
     base.set_value(profile.base_score);
-    root.append(&gtk::Label::new(Some("Base score")));
-    root.append(&base);
+    base.set_hexpand(true);
+    body.append(&field_label("Base score"));
+    body.append(&base);
 
     let missing = gtk::DropDown::from_strings(&["ignore", "penalize", "unknown", "incomplete"]);
     missing.set_selected(match profile.missing_data {
@@ -556,18 +201,11 @@ fn edit_profile_dialog(
         MissingDataPolicy::Unknown => 2,
         MissingDataPolicy::Incomplete => 3,
     });
-    root.append(&gtk::Label::new(Some("Missing-data policy")));
-    root.append(&missing);
+    missing.set_hexpand(true);
+    body.append(&field_label("Missing-data policy"));
+    body.append(&missing);
 
-    let crit_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    let scroll = gtk::ScrolledWindow::builder()
-        .vexpand(true)
-        .child(&crit_box)
-        .build();
-    root.append(&gtk::Label::new(Some(
-        "Criteria: weight + two-band threshold (≤ / >)",
-    )));
-    root.append(&scroll);
+    body.append(&field_label("Criteria (weight + two-band threshold)"));
 
     struct RowW {
         title: gtk::Entry,
@@ -579,17 +217,18 @@ fn edit_profile_dialog(
         polarity: gtk::DropDown,
         id: String,
     }
-    let mut rows: Vec<RowW> = Vec::new();
+    let rows: Rc<RefCell<Vec<RowW>>> = Rc::new(RefCell::new(Vec::new()));
 
     for c in &profile.criteria {
         let frame = gtk::Frame::new(Some(&c.id));
-        let col = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        col.set_margin_top(6);
-        col.set_margin_bottom(6);
-        col.set_margin_start(6);
-        col.set_margin_end(6);
+        frame.add_css_class("criterion-card");
+        let col = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        col.set_margin_top(8);
+        col.set_margin_bottom(8);
+        col.set_margin_start(8);
+        col.set_margin_end(8);
 
-        let title = gtk::Entry::builder().text(&c.title).build();
+        let title = gtk::Entry::builder().text(&c.title).hexpand(true).build();
         let labels: Vec<&str> = ATTR_CHOICES.iter().map(|(_, l)| *l).collect();
         let attr = gtk::DropDown::from_strings(&labels);
         attr.set_selected(
@@ -598,42 +237,46 @@ fn edit_profile_dialog(
                 .position(|(k, _)| *k == c.attribute)
                 .unwrap_or(0) as u32,
         );
+        attr.set_hexpand(true);
         let weight = gtk::SpinButton::with_range(0.0, 5.0, 0.1);
         weight.set_value(c.weight);
+        weight.set_hexpand(true);
         let polarity = gtk::DropDown::from_strings(&["negative", "positive", "neutral"]);
         polarity.set_selected(match c.polarity {
             FactorPolarity::Negative => 0,
             FactorPolarity::Positive => 1,
             FactorPolarity::Neutral => 2,
         });
+        polarity.set_hexpand(true);
         let (low_max_v, low_adj_v, high_adj_v) = simplify_rules(&c.rules);
         let low_max = gtk::SpinButton::with_range(-1000.0, 1000.0, 0.5);
         low_max.set_value(low_max_v);
+        low_max.set_hexpand(true);
         let low_adj = gtk::SpinButton::with_range(-50.0, 50.0, 1.0);
         low_adj.set_value(low_adj_v);
+        low_adj.set_hexpand(true);
         let high_adj = gtk::SpinButton::with_range(-50.0, 50.0, 1.0);
         high_adj.set_value(high_adj_v);
+        high_adj.set_hexpand(true);
 
-        col.append(&gtk::Label::new(Some("Title")));
+        col.append(&field_label("Title"));
         col.append(&title);
-        col.append(&gtk::Label::new(Some("Attribute")));
+        col.append(&field_label("Attribute"));
         col.append(&attr);
-        col.append(&gtk::Label::new(Some("Weight / polarity")));
-        let wp = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        wp.append(&weight);
-        wp.append(&polarity);
-        col.append(&wp);
-        let band = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        band.append(&gtk::Label::new(Some("≤")));
-        band.append(&low_max);
-        band.append(&gtk::Label::new(Some("adj")));
-        band.append(&low_adj);
-        band.append(&gtk::Label::new(Some("else")));
-        band.append(&high_adj);
-        col.append(&band);
+        col.append(&field_label("Weight"));
+        col.append(&weight);
+        col.append(&field_label("Polarity"));
+        col.append(&polarity);
+        col.append(&field_label("When value ≤"));
+        col.append(&low_max);
+        col.append(&field_label("Adjust (≤ band)"));
+        col.append(&low_adj);
+        col.append(&field_label("Adjust (otherwise)"));
+        col.append(&high_adj);
+
         frame.set_child(Some(&col));
-        crit_box.append(&frame);
-        rows.push(RowW {
+        body.append(&frame);
+        rows.borrow_mut().push(RowW {
             title,
             attr,
             weight,
@@ -646,78 +289,69 @@ fn edit_profile_dialog(
     }
 
     let tip = gtk::Label::new(Some(
-        "For full rule lists / caps / category overrides: Export JSON, edit, Import.",
+        "For full rule lists, caps, and category overrides: Export JSON, edit, Import.",
     ));
     tip.set_wrap(true);
+    tip.set_xalign(0.0);
     tip.add_css_class("dim-label");
-    root.append(&tip);
+    body.append(&tip);
+
+    let err = gtk::Label::new(None);
+    err.set_xalign(0.0);
+    err.set_wrap(true);
+    err.add_css_class("status-err");
+    body.append(&err);
+
+    // Sticky footer actions
+    footer.set_orientation(gtk::Orientation::Vertical);
+    footer.set_spacing(8);
+    footer.add_css_class("profiles-editor-footer");
+    footer.set_margin_top(8);
+    footer.set_margin_bottom(4);
 
     let btn_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    btn_row.set_homogeneous(true);
     let save = gtk::Button::with_label("Save");
     save.add_css_class("suggested-action");
     let cancel = gtk::Button::with_label("Cancel");
     btn_row.append(&save);
     btn_row.append(&cancel);
-    root.append(&btn_row);
-    let err = gtk::Label::new(None);
-    err.set_xalign(0.0);
-    root.append(&err);
-    dialog.set_child(Some(&root));
+    footer.append(&btn_row);
 
-    let (tx, rx) = std::sync::mpsc::channel::<Option<ScoringProfile>>();
+    let profile_id = profile.id.clone();
+    let profile_desc = profile.description.clone();
+    let profile_ver = profile.version;
+    let labels = profile.labels.clone();
+    let caps = profile.caps.clone();
+    let category_overrides = profile.category_overrides.clone();
 
-    {
+    let collect: Rc<dyn Fn() -> Result<ScoringProfile, String>> = {
         let name = name.clone();
         let base = base.clone();
         let missing = missing.clone();
+        let rows = Rc::clone(&rows);
         let err = err.clone();
-        let tx = tx.clone();
-        let dialog = dialog.clone();
-        let profile_id = profile.id.clone();
-        let profile_desc = profile.description.clone();
-        let profile_ver = profile.version;
-        let labels = profile.labels.clone();
-        let caps = profile.caps.clone();
-        let category_overrides = profile.category_overrides.clone();
-        let rows_snap: Vec<_> = rows
-            .iter()
-            .map(|r| {
-                (
-                    r.title.clone(),
-                    r.attr.clone(),
-                    r.weight.clone(),
-                    r.low_max.clone(),
-                    r.low_adj.clone(),
-                    r.high_adj.clone(),
-                    r.polarity.clone(),
-                    r.id.clone(),
-                )
-            })
-            .collect();
-
-        save.connect_clicked(move |_| {
+        Rc::new(move || {
             let mut criteria = Vec::new();
-            for (title_e, attr_dd, weight_sb, low_max_sb, low_adj_sb, high_adj_sb, pol_dd, id) in
-                &rows_snap
-            {
-                let title = title_e.text().to_string();
+            for r in rows.borrow().iter() {
+                let title = r.title.text().to_string();
                 let attribute = ATTR_CHOICES
-                    .get(attr_dd.selected() as usize)
+                    .get(r.attr.selected() as usize)
                     .map(|(k, _)| (*k).to_string())
                     .unwrap_or_else(|| attrs::SUGARS_100G.to_string());
-                let thr = low_max_sb.value();
-                let low = low_adj_sb.value();
-                let high = high_adj_sb.value();
-                let polarity = match pol_dd.selected() {
+                let thr = r.low_max.value();
+                let low = r.low_adj.value();
+                let high = r.high_adj.value();
+                let polarity = match r.polarity.selected() {
                     1 => FactorPolarity::Positive,
                     2 => FactorPolarity::Neutral,
                     _ => FactorPolarity::Negative,
                 };
                 criteria.push(Criterion {
-                    id: id.clone(),
+                    id: r.id.clone(),
                     title,
                     attribute,
-                    weight: weight_sb.value(),
+                    weight: r.weight.value(),
                     polarity,
                     rules: vec![
                         ThresholdRule {
@@ -768,12 +402,86 @@ fn edit_profile_dialog(
             };
             if let Err(e) = out.validate() {
                 err.set_text(&e);
-                return;
+                return Err(e);
             }
-            let _ = tx.send(Some(out));
-            dialog.close();
-        });
+            err.set_text("");
+            Ok(out)
+        })
+    };
+
+    {
+        let emit = Rc::clone(emit);
+        save.connect_clicked(move |_| emit(ProfilePageEvent::SaveEdit));
     }
+    {
+        let emit = Rc::clone(emit);
+        cancel.connect_clicked(move |_| emit(ProfilePageEvent::CancelEdit));
+    }
+
+    EditorHandle { collect }
+}
+
+fn field_label(text: &str) -> gtk::Label {
+    let lab = gtk::Label::new(Some(text));
+    lab.set_halign(gtk::Align::Start);
+    lab.set_xalign(0.0);
+    lab.add_css_class("field-label");
+    lab
+}
+
+/// Minimal text prompt (single field) — OK on small screens.
+pub fn ask_text(
+    parent: &impl IsA<gtk::Window>,
+    title: &str,
+    placeholder: &str,
+    initial: &str,
+) -> Option<String> {
+    let dialog = gtk::Window::builder()
+        .title(title)
+        .transient_for(parent)
+        .modal(true)
+        .default_width(320)
+        .resizable(true)
+        .build();
+
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    root.set_margin_top(14);
+    root.set_margin_bottom(14);
+    root.set_margin_start(14);
+    root.set_margin_end(14);
+
+    let entry = gtk::Entry::builder()
+        .text(initial)
+        .placeholder_text(placeholder)
+        .hexpand(true)
+        .build();
+    root.append(&entry);
+
+    let btn_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    btn_row.set_homogeneous(true);
+    let ok = gtk::Button::with_label("OK");
+    ok.add_css_class("suggested-action");
+    let cancel = gtk::Button::with_label("Cancel");
+    btn_row.append(&ok);
+    btn_row.append(&cancel);
+    root.append(&btn_row);
+    dialog.set_child(Some(&root));
+
+    let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+    ok.connect_clicked({
+        let dialog = dialog.clone();
+        let entry = entry.clone();
+        let tx = tx.clone();
+        move |_| {
+            let t = entry.text().to_string();
+            let _ = tx.send(if t.trim().is_empty() {
+                None
+            } else {
+                Some(t)
+            });
+            dialog.close();
+        }
+    });
     cancel.connect_clicked({
         let dialog = dialog.clone();
         let tx = tx.clone();
@@ -789,11 +497,36 @@ fn edit_profile_dialog(
             gtk::glib::Propagation::Proceed
         }
     });
+    entry.connect_activate({
+        let ok = ok.clone();
+        move |_| ok.emit_clicked()
+    });
 
     dialog.present();
+    entry.grab_focus();
     let result = recv_modal(&rx);
     dialog.destroy();
     result
+}
+
+/// Path prompt for Import JSON.
+pub fn ask_path(parent: &impl IsA<gtk::Window>) -> Option<String> {
+    ask_text(
+        parent,
+        "Import profile JSON",
+        "Absolute path to .json",
+        "",
+    )
+}
+
+fn recv_modal<T>(rx: &std::sync::mpsc::Receiver<T>) -> T {
+    loop {
+        if let Ok(v) = rx.try_recv() {
+            return v;
+        }
+        while gtk::glib::MainContext::default().iteration(false) {}
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
 }
 
 fn simplify_rules(rules: &[ThresholdRule]) -> (f64, f64, f64) {
@@ -818,4 +551,10 @@ fn simplify_rules(rules: &[ThresholdRule]) -> (f64, f64, f64) {
         }
     }
     (low_max, low_adj, high_adj)
+}
+
+/// Clear editor containers when leaving edit mode.
+pub fn clear_editor(body: &gtk::Box, footer: &gtk::Box) {
+    clear_container(body);
+    clear_container(footer);
 }

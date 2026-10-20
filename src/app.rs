@@ -1090,12 +1090,17 @@ impl Component for AppModel {
                                 add_css_class: "scan-hint",
                                 set_halign: gtk::Align::Center,
                                 set_wrap: true,
+                                // Hide hint/guide chrome until a real frame arrives (no empty flash).
+                                #[watch]
+                                set_visible: model.preview.is_some(),
                             },
 
                             gtk::Overlay {
                                 set_hexpand: true,
                                 set_height_request: 260,
                                 add_css_class: "scan-preview",
+                                #[watch]
+                                set_visible: model.preview.is_some(),
 
                                 #[wrap(Some)]
                                 set_child = &gtk::Picture {
@@ -1973,7 +1978,7 @@ impl Component for AppModel {
             }
             Msg::ScanCamera => {
                 if !self.scanning {
-                    // Best-effort portal ping (Snapshot-style); capture stays V4L2.
+                    // Best-effort portal ping; capture uses V4L2 and/or libcamera/GStreamer.
                     try_xdg_camera_portal_hint();
                     // Re-probe so a re-login / unplugged camera is reflected.
                     self.camera_probe = camera::camera_probe();
@@ -1986,8 +1991,7 @@ impl Component for AppModel {
                         self.scanning = true;
                         self.preview = None;
                         self.status_kind = StatusKind::Loading;
-                        self.status_text =
-                            "Live preview on — center the barcode in the guide.".into();
+                        self.status_text = "Opening camera…".into();
                         self.product = None;
                         self.summary = None;
                         self.product_image = None;
@@ -2015,6 +2019,7 @@ impl Component for AppModel {
                     let stride = (width as usize).saturating_mul(3);
                     let needed = stride.saturating_mul(height as usize);
                     if width > 0 && height > 0 && stride > 0 && rgb.len() >= needed {
+                        let first = self.preview.is_none();
                         let bytes = gtk::glib::Bytes::from_owned(rgb);
                         let texture = gdk::MemoryTexture::new(
                             width as i32,
@@ -2024,6 +2029,10 @@ impl Component for AppModel {
                             stride,
                         );
                         self.preview = Some(texture.upcast());
+                        if first {
+                            self.status_text =
+                                "Live preview on — center the barcode in the guide.".into();
+                        }
                     }
                 }
             }

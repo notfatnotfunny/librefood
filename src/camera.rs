@@ -1,11 +1,11 @@
-//! Webcam barcode scanning via raw V4L2 (`v4l` crate) + rxing.
+//! Webcam barcode scanning via raw V4L2 + optional GStreamer/libcamera.
 //!
-//! Supports single-planar (USB UVC / MJPEG) and **multiplanar** capture
-//! (Qualcomm CAMSS on phones like OnePlus fajita: `Video Capture Multiplanar`
-//! with UYVY/YUYV). Flow: QUERYCAP → ENUM_FMT (capture + mplane) → S_FMT →
-//! MMAP → RGB → barcode decode.
+//! * **USB / simple V4L2:** single- or multi-planar ENUM_FMT → S_FMT → MMAP.
+//! * **Qualcomm CAMSS phones:** raw STREAMON often returns `Broken pipe`; we
+//!   fall back to GStreamer `libcamerasrc` (preferred) or `pipewiresrc`.
 //!
 //! Override: `LIBREFOOD_CAMERA_DEVICE=/dev/video0`
+//! Backend: `LIBREFOOD_CAMERA_BACKEND=auto|v4l2|libcamera|pipewire`
 //! Debug: `LIBREFOOD_CAMERA_DEBUG=1`
 
 use image::ImageReader;
@@ -131,8 +131,12 @@ pub fn camera_probe_quick() -> CameraProbe {
         join_paths(&all_nodes),
         join_paths(&capture)
     ));
-    if capture.is_empty() {
+    if capture.is_empty() && !crate::gst_cam::gst_camera_available() {
         CameraProbe::Missing
+    } else if capture.is_empty() {
+        CameraProbe::Present {
+            detail: "no V4L2 capture nodes; GStreamer/libcamera may still work".into(),
+        }
     } else {
         CameraProbe::Present {
             detail: format!(
@@ -147,9 +151,18 @@ pub fn camera_probe_quick() -> CameraProbe {
 pub fn camera_probe() -> CameraProbe {
     let capture = list_capture_video_nodes();
     cam_debug(format!(
-        "probe start; capture=[{}]",
-        join_paths(&capture)
+        "probe start; capture=[{}] camss={}",
+        join_paths(&capture),
+        detect_camss_system()
     ));
+    // Prefer libcamera on CAMSS — raw V4L2 STREAMON is broken there.
+    if detect_camss_system() || backend_prefers_gst() {
+        if let Ok(cam) = crate::gst_cam::GstCamera::open() {
+            cam_debug(format!("probe OK via gst ({})", cam.source_label()));
+            drop(cam);
+            return CameraProbe::Ready;
+        }
+    }
     match open_first_working() {
         Ok((path, fmt)) => {
             cam_debug(format!(
@@ -161,10 +174,69 @@ pub fn camera_probe() -> CameraProbe {
             ));
             CameraProbe::Ready
         }
-        Err(CameraError::NoCamera) => CameraProbe::Missing,
-        Err(CameraError::Open(detail)) => classify_probe_failure(&detail, &capture),
+        Err(CameraError::NoCamera) => {
+            if crate::gst_cam::GstCamera::open().is_ok() {
+                CameraProbe::Ready
+            } else {
+                CameraProbe::Missing
+            }
+        }
+        Err(CameraError::Open(detail)) => {
+            if is_v4l_pipeline_dead(&detail) {
+                if crate::gst_cam::GstCamera::open().is_ok() {
+                    return CameraProbe::Ready;
+                }
+            }
+            classify_probe_failure(&detail, &capture)
+        }
         Err(e) => classify_probe_failure(&e.to_string(), &capture),
     }
+}
+
+fn backend_prefers_gst() -> bool {
+    matches!(
+        std::env::var("LIBREFOOD_CAMERA_BACKEND")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "libcamera" | "gst" | "gstreamer" | "pipewire" | "pw"
+    )
+}
+
+fn is_v4l_pipeline_dead(msg: &str) -> bool {
+    let l = msg.to_lowercase();
+    l.contains("broken pipe")
+        || l.contains("streamon")
+        || l.contains("camss")
+        || l.contains("need libcamera")
+}
+
+/// Qualcomm CAMSS (and similar) — raw /dev/video* STREAMON needs media graph / libcamera.
+fn detect_camss_system() -> bool {
+    for path in list_dev_video_nodes() {
+        let Ok(dev) = Device::with_path(&path) else {
+            continue;
+        };
+        let Ok(caps) = dev.query_caps() else {
+            continue;
+        };
+        let card = caps.card.to_ascii_lowercase();
+        let bus = caps.bus.to_ascii_lowercase();
+        if card.contains("camss")
+            || bus.contains("camss")
+            || card.contains("qualcomm camera")
+            || (card.contains("qualcomm") && card.contains("camera"))
+        {
+            cam_debug(format!(
+                "CAMSS-like device {} card=\"{}\" bus=\"{}\"",
+                path.display(),
+                caps.card,
+                caps.bus
+            ));
+            return true;
+        }
+    }
+    false
 }
 
 fn classify_probe_failure(detail: &str, capture_nodes: &[PathBuf]) -> CameraProbe {
@@ -856,6 +928,7 @@ fn open_first_working() -> Result<(PathBuf, NegotiatedFormat), CameraError> {
     }
 
     let mut failures: Vec<(String, FailureKind)> = Vec::new();
+    let mut broken_pipe_hits = 0u32;
     for path in &candidates {
         cam_debug(format!("trying {}", path.display()));
         match try_device(path) {
@@ -864,6 +937,17 @@ fn open_first_working() -> Result<(PathBuf, NegotiatedFormat), CameraError> {
             }
             Err(e) => {
                 cam_debug(format!("fail {}: {e}", path.display()));
+                let lower = e.to_lowercase();
+                if lower.contains("broken pipe") || lower.contains("streamon") {
+                    broken_pipe_hits += 1;
+                    // CAMSS: every pad fails the same way — stop and let caller use libcamera.
+                    if detect_camss_system() || broken_pipe_hits >= 2 {
+                        return Err(CameraError::Open(format!(
+                            "V4L2 STREAMON failed ({e}). Qualcomm CAMSS nodes need libcamera \
+                             (not raw /dev/video*). Will try GStreamer libcamerasrc/pipewiresrc."
+                        )));
+                    }
+                }
                 failures.push((format!("{}: {e}", path.display()), FailureKind::from_message(&e)));
             }
         }
@@ -875,7 +959,6 @@ fn open_first_working() -> Result<(PathBuf, NegotiatedFormat), CameraError> {
     let mut perm = 0usize;
     let mut busy = 0usize;
     for (msg, kind) in &failures {
-        // Strip path prefix for grouping: "/dev/videoN: rest"
         let rest = msg
             .split_once(": ")
             .map(|(_, r)| r.to_string())
@@ -903,10 +986,11 @@ fn open_first_working() -> Result<(PathBuf, NegotiatedFormat), CameraError> {
         " Permission denied — add user to `video` group and re-login."
     } else if busy > 0 {
         " Device busy — close other camera apps."
+    } else if broken_pipe_hits > 0 || detect_camss_system() {
+        " Install libcamera + GStreamer libcamerasrc (see README); \
+         set LIBREFOOD_CAMERA_BACKEND=libcamera."
     } else {
-        " Try LIBREFOOD_CAMERA_DEVICE=/dev/video0 and LIBREFOOD_CAMERA_DEBUG=1; \
-         check `v4l2-ctl --list-formats-ext -d /dev/video0` \
-         (phones often need Multiplanar + UYVY/YUYV; some CAMSS pads need libcamera)."
+        " Try LIBREFOOD_CAMERA_DEVICE=/dev/video0 and LIBREFOOD_CAMERA_DEBUG=1."
     };
 
     Err(CameraError::Open(format!(
@@ -1034,6 +1118,108 @@ pub fn scan_barcode_live<F>(
 where
     F: FnMut(u32, u32, Vec<u8>),
 {
+    let backend = std::env::var("LIBREFOOD_CAMERA_BACKEND")
+        .unwrap_or_else(|_| "auto".into())
+        .to_ascii_lowercase();
+    let camss = detect_camss_system();
+    cam_debug(format!(
+        "scan backend={backend} camss={camss} gst_avail={}",
+        crate::gst_cam::gst_camera_available()
+    ));
+
+    let try_gst_first = matches!(
+        backend.as_str(),
+        "libcamera" | "gst" | "gstreamer" | "pipewire" | "pw"
+    ) || (backend == "auto" && camss);
+
+    if try_gst_first {
+        match scan_gst_live(max_frames, Arc::clone(&stop), &mut on_frame) {
+            Ok(code) => return Ok(code),
+            Err(e) => {
+                cam_debug(format!("gst scan failed: {e}"));
+                if matches!(
+                    backend.as_str(),
+                    "libcamera" | "gst" | "gstreamer" | "pipewire" | "pw"
+                ) {
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    if !matches!(
+        backend.as_str(),
+        "libcamera" | "gst" | "gstreamer" | "pipewire" | "pw"
+    ) {
+        match scan_v4l2_live(max_frames, Arc::clone(&stop), &mut on_frame) {
+            Ok(code) => return Ok(code),
+            Err(e) => {
+                let msg = e.to_string();
+                cam_debug(format!("v4l2 scan failed: {msg}"));
+                if is_v4l_pipeline_dead(&msg) || camss {
+                    cam_debug("falling back to GStreamer/libcamera");
+                    return scan_gst_live(max_frames, stop, &mut on_frame).map_err(|ge| {
+                        CameraError::Open(format!(
+                            "V4L2 failed ({msg}); libcamera/GStreamer also failed ({ge}). \
+                             On Alpine: apk add libcamera gst-plugins-base gst-plugin-libcamera \
+                             (names vary) — see README."
+                        ))
+                    });
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    scan_gst_live(max_frames, stop, &mut on_frame)
+}
+
+fn scan_gst_live<F>(
+    max_frames: u32,
+    stop: Arc<AtomicBool>,
+    on_frame: &mut F,
+) -> Result<String, CameraError>
+where
+    F: FnMut(u32, u32, Vec<u8>),
+{
+    let mut cam = crate::gst_cam::GstCamera::open().map_err(CameraError::Open)?;
+    cam_debug(format!("scanning via gst ({})", cam.source_label()));
+    let mut last_err = CameraError::NoBarcode;
+    for i in 0..max_frames {
+        if stop.load(Ordering::Relaxed) {
+            return Err(CameraError::Cancelled);
+        }
+        let (width, height, rgb) =
+            match cam.next_rgb(gstreamer::ClockTime::from_mseconds(500)) {
+                Ok(v) => v,
+                Err(e) => {
+                    last_err = CameraError::Capture(e);
+                    continue;
+                }
+            };
+        if i % 2 == 0 {
+            let (pw, ph, prgb) = shrink_for_preview(width, height, &rgb, 640);
+            on_frame(pw, ph, prgb);
+        }
+        if let Some(code) = decode_barcode(width, height, &rgb) {
+            return Ok(code);
+        }
+    }
+    if stop.load(Ordering::Relaxed) {
+        Err(CameraError::Cancelled)
+    } else {
+        Err(last_err)
+    }
+}
+
+fn scan_v4l2_live<F>(
+    max_frames: u32,
+    stop: Arc<AtomicBool>,
+    on_frame: &mut F,
+) -> Result<String, CameraError>
+where
+    F: FnMut(u32, u32, Vec<u8>),
+{
     let (path, negotiated) = open_first_working()?;
     cam_debug(format!(
         "scanning on {} {}x{} {:?} ({:?})",
@@ -1045,10 +1231,8 @@ where
     ));
 
     let dev = Device::with_path(&path).map_err(|e| CameraError::Open(e.to_string()))?;
-    // Re-apply format after reopen (must match mode from probe).
     let fmt = negotiate_format(&dev).map_err(CameraError::Open)?;
-    let mut stream =
-        FrameStream::open(&dev, fmt.mode, 4).map_err(CameraError::Open)?;
+    let mut stream = FrameStream::open(&dev, fmt.mode, 4).map_err(CameraError::Open)?;
 
     std::thread::sleep(Duration::from_millis(50));
 

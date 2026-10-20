@@ -1,5 +1,6 @@
 mod app;
 mod camera;
+mod gst_cam;
 mod engine;
 mod library;
 mod logo;

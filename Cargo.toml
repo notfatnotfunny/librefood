@@ -18,6 +18,9 @@ v4l = "0.14"
 libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 rxing = "0.5"
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+gstreamer-video = "0.23"
 
 [profile.release]
 lto = true

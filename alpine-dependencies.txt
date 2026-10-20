@@ -1,1 +1,18 @@
+# Build
 build-base cargo glib-dev pango-dev gdk-pixbuf-dev gtk4.0-dev clang23-dev libadwaita-dev
+gstreamer-dev gst-plugins-base-dev
+
+# Runtime — USB webcam (V4L2)
+v4l-utils
+
+# Runtime — phone camera (libcamera / GStreamer; Qualcomm CAMSS e.g. fajita)
+libcamera
+libcamera-tools
+gst-plugins-base
+gstreamer-tools
+pipewire
+wireplumber
+xdg-desktop-portal
+xdg-desktop-portal-gtk
+# libcamerasrc — name varies; try: gst-plugin-libcamera  or  gst-plugins-libcamera
+# apk search libcamera; apk search gstreamer | grep -i camera

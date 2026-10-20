@@ -62,14 +62,6 @@ impl CameraProbe {
         matches!(self, Self::Ready)
     }
 
-    pub fn scan_button_label(&self) -> &'static str {
-        match self {
-            Self::Ready | Self::Present { .. } | Self::Busy { .. } => "Scan with camera",
-            Self::PermissionDenied { .. } => "Camera needs access — tap to retry",
-            Self::Missing => "Camera unavailable — type a barcode",
-        }
-    }
-
     pub fn unavailable_message(&self) -> String {
         match self {
             Self::Ready => String::new(),
@@ -1692,7 +1684,6 @@ mod tests {
                 detail: "fail".into(),
             },
         ] {
-            assert!(!p.scan_button_label().to_lowercase().contains("blocked"));
             assert!(!p.unavailable_message().to_lowercase().contains("blocked"));
         }
     }

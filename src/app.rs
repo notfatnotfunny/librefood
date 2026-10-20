@@ -39,8 +39,6 @@ pub enum Msg {
     WidthChanged(i32),
     ProfileSelected(u32),
     Profiles(ui_profiles::ProfilePageEvent),
-    /// Rebuild Profiles list/actions after the current update returns (avoids GTK freezes).
-    RefreshProfilesUi,
     /// Append one profile row (create/duplicate/import) without clearing the list.
     ProfilesListAppend(String),
     /// Remove one profile row without clearing the list.
@@ -443,8 +441,7 @@ fn refresh_profiles_page(
         model.selected_profile_id.as_deref(),
         &emit,
     );
-    // Actions are static — only build once (or when empty). Rebuilding FlowBox
-    // on every Set active races GTK layout and freezes the UI.
+    // Actions are static — only build once (or when empty).
     if widgets.profiles_actions.first_child().is_none() {
         ui_profiles::rebuild_profile_actions(&widgets.profiles_actions, &emit);
     }
@@ -505,10 +502,6 @@ fn sync_profile_dropdown(widgets: &AppModelWidgets, model: &mut AppModel) {
             .set_selected(model.active_profile_index.min(want.saturating_sub(1)));
     }
     model.suppress_profile_dropdown = false;
-}
-
-fn schedule_profiles_ui_refresh(sender: &ComponentSender<AppModel>) {
-    queue_msg(sender, Msg::RefreshProfilesUi);
 }
 
 /// Never call `sender.input` directly from inside `update` — Relm4 may re-enter
@@ -2225,9 +2218,6 @@ impl Component for AppModel {
             Msg::Profiles(ev) => {
                 handle_profiles_event(self, widgets, root, sender.clone(), ev);
             }
-            Msg::RefreshProfilesUi => {
-                refresh_profiles_page(widgets, self, &sender);
-            }
             Msg::ProfilesListAppend(id) => {
                 if std::env::var("LIBREFOOD_SMOKE_NEW_PROFILE").ok().as_deref() == Some("1")
                 {
@@ -3092,16 +3082,49 @@ fn load_css() {
             border-bottom: 1px solid alpha(@card_fg_color, 0.08);
         }
         .profile-row {
-            padding: 8px 4px;
+            padding: 10px 8px;
+            border-radius: 10px;
         }
         .profile-row-title { font-weight: 650; }
         .profile-row-selected {
-            background: alpha(@accent_bg_color, 0.18);
-            border-radius: 8px;
+            background: alpha(@accent_bg_color, 0.16);
+            border-radius: 10px;
         }
         .profiles-actions-bar {
-            padding-top: 8px;
+            padding-top: 10px;
             border-top: 1px solid alpha(@card_fg_color, 0.1);
+        }
+        .profile-actions {
+            spacing: 6px;
+        }
+        .profile-action {
+            min-height: 44px;
+            border-radius: 12px;
+            font-weight: 600;
+        }
+        .profile-action-primary {
+            min-height: 46px;
+        }
+        .profile-action-secondary {
+            background-color: alpha(@window_fg_color, 0.06);
+        }
+        .profile-action-secondary:hover {
+            background-color: alpha(@window_fg_color, 0.10);
+        }
+        .profile-action-quiet {
+            font-weight: 500;
+            min-height: 40px;
+            opacity: 0.9;
+        }
+        .profile-action-danger {
+            font-weight: 500;
+            min-height: 40px;
+            color: #c62828;
+        }
+        .profile-action-sep {
+            opacity: 0.35;
+            margin-left: 2px;
+            margin-right: 2px;
         }
         .profiles-editor-footer {
             padding-top: 8px;

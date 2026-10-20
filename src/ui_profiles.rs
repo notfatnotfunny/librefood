@@ -229,43 +229,91 @@ pub fn relabel_profile_list(
     }
 }
 
-/// Mount New / Duplicate / … action buttons into `actions`.
+/// Mount profile actions as a modern vertical list (no FlowBox grid).
 pub fn rebuild_profile_actions(actions: &gtk::Box, emit: &Rc<dyn Fn(ProfilePageEvent)>) {
     clear_container(actions);
     actions.set_orientation(gtk::Orientation::Vertical);
-    actions.set_spacing(8);
+    actions.set_spacing(6);
+    actions.add_css_class("profile-actions");
 
-    let flow = gtk::FlowBox::new();
-    // 2-up wraps cleanly from ~360px; avoids clipped third columns on phones.
-    flow.set_max_children_per_line(2);
-    flow.set_min_children_per_line(1);
-    flow.set_selection_mode(gtk::SelectionMode::None);
-    flow.set_homogeneous(true);
-    flow.set_column_spacing(6);
-    flow.set_row_spacing(6);
-    flow.set_hexpand(true);
-
-    let buttons: &[(&str, ProfilePageEvent, bool)] = &[
-        ("New", ProfilePageEvent::New, true),
-        ("Set active", ProfilePageEvent::SetActive, false),
-        ("Duplicate", ProfilePageEvent::Duplicate, false),
-        ("Edit", ProfilePageEvent::StartEdit, false),
-        ("Export JSON", ProfilePageEvent::Export, false),
-        ("Import JSON", ProfilePageEvent::Import, false),
-        ("Delete", ProfilePageEvent::Delete, false),
-    ];
-
-    for (label, event, suggested) in buttons {
+    fn action_btn(
+        label: &str,
+        event: ProfilePageEvent,
+        classes: &[&str],
+        emit: &Rc<dyn Fn(ProfilePageEvent)>,
+    ) -> gtk::Button {
         let btn = gtk::Button::with_label(label);
-        if *suggested {
-            btn.add_css_class("suggested-action");
+        btn.set_hexpand(true);
+        btn.set_halign(gtk::Align::Fill);
+        if let Some(child) = btn.child() {
+            if let Ok(lab) = child.downcast::<gtk::Label>() {
+                lab.set_halign(gtk::Align::Start);
+                lab.set_xalign(0.0);
+                lab.set_margin_start(14);
+                lab.set_margin_end(14);
+            }
+        }
+        for c in classes {
+            btn.add_css_class(c);
         }
         let emit = Rc::clone(emit);
-        let event = event.clone();
         btn.connect_clicked(move |_| emit(event.clone()));
-        flow.append(&btn);
+        btn
     }
-    actions.append(&flow);
+
+    // Primary CTA
+    actions.append(&action_btn(
+        "New profile",
+        ProfilePageEvent::New,
+        &["suggested-action", "profile-action", "profile-action-primary"],
+        emit,
+    ));
+
+    // Core actions — full-width, left-aligned feel via CSS
+    let core: &[(&str, ProfilePageEvent)] = &[
+        ("Set as active", ProfilePageEvent::SetActive),
+        ("Edit", ProfilePageEvent::StartEdit),
+        ("Duplicate", ProfilePageEvent::Duplicate),
+    ];
+    for (label, event) in core {
+        actions.append(&action_btn(
+            label,
+            event.clone(),
+            &["profile-action", "profile-action-secondary"],
+            emit,
+        ));
+    }
+
+    let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+    sep.add_css_class("profile-action-sep");
+    sep.set_margin_top(4);
+    sep.set_margin_bottom(2);
+    actions.append(&sep);
+
+    // Quiet import/export
+    let io_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    io_row.set_homogeneous(true);
+    io_row.set_hexpand(true);
+    io_row.append(&action_btn(
+        "Import",
+        ProfilePageEvent::Import,
+        &["profile-action", "profile-action-quiet", "flat"],
+        emit,
+    ));
+    io_row.append(&action_btn(
+        "Export",
+        ProfilePageEvent::Export,
+        &["profile-action", "profile-action-quiet", "flat"],
+        emit,
+    ));
+    actions.append(&io_row);
+
+    actions.append(&action_btn(
+        "Delete",
+        ProfilePageEvent::Delete,
+        &["profile-action", "profile-action-danger", "flat"],
+        emit,
+    ));
 }
 
 /// Mount a full-page scrollable editor into `body`, sticky Save/Cancel into `footer`.

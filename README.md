@@ -92,7 +92,7 @@ Flathub expects an offline Cargo build. When you have a public GitHub repo:
 2. Point the module `sources` at a git tag / archive **plus** `cargo-sources.json`, and use `cargo --offline build --release --locked`.
 3. Open a PR against [flathub/flathub](https://github.com/flathub/flathub) with app id `org.librefood.Librefood` (do **not** open until credentials / upstream repo exist).
 
-Screenshot URL in the metainfo is a placeholder until the GitHub remote is created.
+AppStream screenshots are omitted until a public GitHub remote can host them (required HTTPS image URLs).
 
 ## Project layout
 

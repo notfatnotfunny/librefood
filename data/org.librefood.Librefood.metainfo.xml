@@ -27,12 +27,7 @@
   </description>
   <launchable type="desktop-id">org.librefood.Librefood.desktop</launchable>
   <url type="homepage">https://world.openfoodfacts.org/</url>
-  <screenshots>
-    <screenshot type="default">
-      <caption>Live camera preview with barcode centering guide</caption>
-      <image>https://raw.githubusercontent.com/librefood/librefood/main/data/screenshots/camera-preview.png</image>
-    </screenshot>
-  </screenshots>
+  <!-- Screenshots require a public HTTPS URL (add when the GitHub remote exists). -->
   <releases>
     <release version="0.1.0" date="2026-10-20">
       <description>
@@ -46,8 +41,4 @@
   <requires>
     <display_length compare="ge">360</display_length>
   </requires>
-  <recommends>
-    <control>pointing</control>
-    <control>keyboard</control>
-  </recommends>
 </component>

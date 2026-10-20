@@ -44,7 +44,7 @@ Fields include weighted `criteria`, threshold `rules`, `caps`, `category_overrid
 1. Look up a barcode (or search by name, or scan).
 2. Choose a profile in the dropdown — the same product is rescored immediately.
 3. **Compare** shows scores for every profile on the current product.
-4. **Manage profiles…** → duplicate, edit weights/thresholds, import/export, delete overrides.
-5. Calculation steps list each criterion’s value, weight, rule, and Δ contribution.
+4. **Manage profiles…** → duplicate, edit weights/thresholds, import/export, delete overrides, restore built-ins; expand **How scoring works** for the engine order notes.
+5. Calculation steps list each criterion’s id/attribute, raw value, rule adjust, weight, source, and Δ contribution.
 
 Custom scores are **not** official Nutri-Score grades and are **not** medical advice. OFF Nutri-Score letters, when present, are shown as source data only.

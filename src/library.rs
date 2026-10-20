@@ -24,11 +24,7 @@ pub struct LibraryEntry {
 }
 
 impl LibraryEntry {
-    pub fn from_scored(
-        product: &ProductModel,
-        summary: &ScoreSummary,
-        profile_id: &str,
-    ) -> Self {
+    pub fn from_scored(product: &ProductModel, summary: &ScoreSummary) -> Self {
         Self {
             barcode: product.barcode.clone(),
             name: product.name.clone(),
@@ -38,7 +34,7 @@ impl LibraryEntry {
                 .or_else(|| product.brands.clone()),
             score_display: Some(summary.score_display.clone()),
             score_label: Some(summary.label.clone()),
-            profile_id: Some(profile_id.to_string()),
+            profile_id: Some(summary.profile_id.clone()),
             profile_name: Some(summary.profile_name.clone()),
             timestamp: now_secs(),
         }

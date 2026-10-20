@@ -44,7 +44,6 @@ pub enum Msg {
     OpenLibraryBarcode(String),
     ClearHistory,
     RemoveFavorite(String),
-    RefreshLibraryLists,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,8 +185,8 @@ impl AppModel {
             return String::new();
         };
         let mut parts = vec![format!(
-            "Profile “{}” v{} · Librefood heuristic (not medical advice)",
-            s.profile_name, s.profile_version
+            "Profile “{}” (`{}`) v{} · {} pts · Librefood heuristic (not medical advice)",
+            s.profile_name, s.profile_id, s.profile_version, s.score
         )];
         if let Some(p) = &self.product {
             if let Some(g) = p.nutriscore_grade {
@@ -305,8 +304,7 @@ impl AppModel {
         let (Some(product), Some(summary)) = (&self.product, &self.summary) else {
             return;
         };
-        let entry =
-            LibraryEntry::from_scored(product, summary, self.store.active_id());
+        let entry = LibraryEntry::from_scored(product, summary);
         let _ = self.history.record(entry);
     }
 }
@@ -1376,7 +1374,7 @@ impl Component for AppModel {
                     self.update_view(widgets, sender);
                     return;
                 };
-                let entry = LibraryEntry::from_scored(product, summary, self.store.active_id());
+                let entry = LibraryEntry::from_scored(product, summary);
                 match self.favorites.toggle(entry) {
                     Ok(true) => {
                         self.status_text = "Added to favorites.".into();
@@ -1414,14 +1412,6 @@ impl Component for AppModel {
                 } else {
                     self.status_text = "Removed from favorites.".into();
                 }
-                rebuild_favorites_list(
-                    &widgets.favorites_list,
-                    self.favorites.entries(),
-                    &sender,
-                );
-            }
-            Msg::RefreshLibraryLists => {
-                rebuild_history_list(&widgets.history_list, self.history.entries(), &sender);
                 rebuild_favorites_list(
                     &widgets.favorites_list,
                     self.favorites.entries(),

@@ -3,13 +3,14 @@
 pub mod eval;
 pub mod schema;
 
-pub use eval::{evaluate, Contribution, ScoreResult};
+pub use eval::{evaluate, ScoreResult};
 pub use schema::{
-    CategoryOverride, Criterion, FactorPolarity, MissingDataPolicy, ScoreCap, ScoreLabelBand,
-    ScoreScale, ScoringProfile, ThresholdRule, Tone, When,
+    Criterion, FactorPolarity, MissingDataPolicy, ScoreLabelBand, ScoreScale, ScoringProfile,
+    ThresholdRule, Tone, When,
 };
 
 /// Documentation of formula / execution order (also in docs/scoring-engine.md).
+/// Shown in the Manage profiles dialog.
 pub const ENGINE_NOTES: &str = r#"
 Librefood scoring engine
 ------------------------

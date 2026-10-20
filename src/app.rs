@@ -2,6 +2,7 @@
 
 use crate::camera::{self, CameraError};
 use crate::engine::{self, ScoreResult};
+use crate::library::{FavoritesStore, HistoryStore, LibraryEntry};
 use crate::logo;
 use crate::off::{self, LookupError};
 use crate::product::ProductModel;
@@ -38,6 +39,19 @@ pub enum Msg {
     ManageProfiles,
     Rescore,
     CompareProfiles,
+    ShowPage(AppPage),
+    ToggleFavorite,
+    OpenLibraryBarcode(String),
+    ClearHistory,
+    RemoveFavorite(String),
+    RefreshLibraryLists,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppPage {
+    Lookup,
+    History,
+    Favorites,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +103,9 @@ pub struct AppModel {
     profile_ids: Vec<String>,
     active_profile_index: u32,
     search_hits: Vec<off::SearchHit>,
+    page: AppPage,
+    history: HistoryStore,
+    favorites: FavoritesStore,
 }
 
 impl AppModel {
@@ -249,14 +266,159 @@ impl AppModel {
         }
     }
 
-    fn profile_name_refs(&self) -> Vec<&str> {
-        self.profile_names.iter().map(|s| s.as_str()).collect()
+    fn is_lookup_page(&self) -> bool {
+        self.page == AppPage::Lookup
+    }
+
+    fn is_history_page(&self) -> bool {
+        self.page == AppPage::History
+    }
+
+    fn is_favorites_page(&self) -> bool {
+        self.page == AppPage::Favorites
+    }
+
+    fn nav_classes(&self, page: AppPage) -> [&'static str; 2] {
+        if self.page == page {
+            ["flat", "suggested-action"]
+        } else {
+            ["flat", "nav-inactive"]
+        }
+    }
+
+    fn is_favorite(&self) -> bool {
+        self.product
+            .as_ref()
+            .map(|p| self.favorites.contains(&p.barcode))
+            .unwrap_or(false)
+    }
+
+    fn favorite_button_label(&self) -> &'static str {
+        if self.is_favorite() {
+            "★ Favorited"
+        } else {
+            "☆ Add to favorites"
+        }
+    }
+
+    fn record_current_to_history(&mut self) {
+        let (Some(product), Some(summary)) = (&self.product, &self.summary) else {
+            return;
+        };
+        let entry =
+            LibraryEntry::from_scored(product, summary, self.store.active_id());
+        let _ = self.history.record(entry);
     }
 }
 
 fn clear_box(container: &gtk::Box) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
+    }
+}
+
+fn rebuild_history_list(
+    container: &gtk::Box,
+    entries: &[LibraryEntry],
+    sender: &ComponentSender<AppModel>,
+) {
+    clear_box(container);
+    if entries.is_empty() {
+        let empty = gtk::Label::new(Some("No history yet — look up a product to start."));
+        empty.add_css_class("dim-label");
+        empty.set_halign(gtk::Align::Start);
+        empty.set_xalign(0.0);
+        container.append(&empty);
+        return;
+    }
+    for entry in entries {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.set_hexpand(true);
+        row.add_css_class("library-row");
+
+        let btn = gtk::Button::new();
+        btn.set_hexpand(true);
+        btn.add_css_class("flat");
+        let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let title = gtk::Label::new(Some(&entry.name));
+        title.add_css_class("factor-title");
+        title.set_halign(gtk::Align::Start);
+        title.set_xalign(0.0);
+        title.set_wrap(true);
+        let sub = gtk::Label::new(Some(&entry.subtitle()));
+        sub.add_css_class("factor-detail");
+        sub.set_halign(gtk::Align::Start);
+        sub.set_xalign(0.0);
+        sub.set_wrap(true);
+        col.append(&title);
+        col.append(&sub);
+        btn.set_child(Some(&col));
+        let code = entry.barcode.clone();
+        let sender2 = sender.clone();
+        btn.connect_clicked(move |_| {
+            sender2.input(Msg::OpenLibraryBarcode(code.clone()));
+        });
+        row.append(&btn);
+        container.append(&row);
+    }
+}
+
+fn rebuild_favorites_list(
+    container: &gtk::Box,
+    entries: &[LibraryEntry],
+    sender: &ComponentSender<AppModel>,
+) {
+    clear_box(container);
+    if entries.is_empty() {
+        let empty = gtk::Label::new(Some(
+            "No favorites yet — open a product and tap “Add to favorites”.",
+        ));
+        empty.add_css_class("dim-label");
+        empty.set_halign(gtk::Align::Start);
+        empty.set_xalign(0.0);
+        empty.set_wrap(true);
+        container.append(&empty);
+        return;
+    }
+    for entry in entries {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.set_hexpand(true);
+        row.add_css_class("library-row");
+
+        let btn = gtk::Button::new();
+        btn.set_hexpand(true);
+        btn.add_css_class("flat");
+        let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let title = gtk::Label::new(Some(&entry.name));
+        title.add_css_class("factor-title");
+        title.set_halign(gtk::Align::Start);
+        title.set_xalign(0.0);
+        title.set_wrap(true);
+        let sub = gtk::Label::new(Some(&entry.subtitle()));
+        sub.add_css_class("factor-detail");
+        sub.set_halign(gtk::Align::Start);
+        sub.set_xalign(0.0);
+        sub.set_wrap(true);
+        col.append(&title);
+        col.append(&sub);
+        btn.set_child(Some(&col));
+        let code = entry.barcode.clone();
+        let sender2 = sender.clone();
+        btn.connect_clicked(move |_| {
+            sender2.input(Msg::OpenLibraryBarcode(code.clone()));
+        });
+
+        let remove = gtk::Button::with_label("Remove");
+        remove.add_css_class("flat");
+        let code2 = entry.barcode.clone();
+        let sender3 = sender.clone();
+        remove.connect_clicked(move |_| {
+            sender3.input(Msg::RemoveFavorite(code2.clone()));
+        });
+
+        row.append(&btn);
+        row.append(&remove);
+        container.append(&row);
     }
 }
 
@@ -349,7 +511,7 @@ fn append_search_hits(
 
 #[relm4::component(pub)]
 impl Component for AppModel {
-    type Init = Option<String>;
+    type Init = (Option<String>, AppPage);
     type Input = Msg;
     type Output = ();
     type CommandOutput = ();
@@ -367,6 +529,37 @@ impl Component for AppModel {
                 set_orientation: gtk::Orientation::Vertical,
 
                 adw::HeaderBar {
+                    pack_start = &gtk::Box {
+                        set_orientation: gtk::Orientation::Horizontal,
+                        set_spacing: 0,
+                        add_css_class: "linked",
+
+                        gtk::Button {
+                            set_label: "Lookup",
+                            #[watch]
+                            set_css_classes: &model.nav_classes(AppPage::Lookup),
+                            connect_clicked[sender] => move |_| {
+                                sender.input(Msg::ShowPage(AppPage::Lookup));
+                            },
+                        },
+                        gtk::Button {
+                            set_label: "History",
+                            #[watch]
+                            set_css_classes: &model.nav_classes(AppPage::History),
+                            connect_clicked[sender] => move |_| {
+                                sender.input(Msg::ShowPage(AppPage::History));
+                            },
+                        },
+                        gtk::Button {
+                            set_label: "Favorites",
+                            #[watch]
+                            set_css_classes: &model.nav_classes(AppPage::Favorites),
+                            connect_clicked[sender] => move |_| {
+                                sender.input(Msg::ShowPage(AppPage::Favorites));
+                            },
+                        },
+                    },
+
                     #[wrap(Some)]
                     set_title_widget = &adw::WindowTitle {
                         set_title: "Librefood",
@@ -374,10 +567,13 @@ impl Component for AppModel {
                     },
                 },
 
+                // —— Lookup page ——
                 gtk::ScrolledWindow {
                     set_vexpand: true,
                     set_hexpand: true,
                     set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
+                    #[watch]
+                    set_visible: model.is_lookup_page(),
 
                     gtk::Box {
                         set_orientation: gtk::Orientation::Vertical,
@@ -701,6 +897,16 @@ impl Component for AppModel {
                                         #[watch]
                                         set_visible: !model.missing_caption().is_empty(),
                                     },
+
+                                    gtk::Button {
+                                        #[watch]
+                                        set_label: model.favorite_button_label(),
+                                        set_halign: gtk::Align::Start,
+                                        set_margin_top: 6,
+                                        connect_clicked[sender] => move |_| {
+                                            sender.input(Msg::ToggleFavorite);
+                                        },
+                                    },
                                 },
                             },
 
@@ -771,6 +977,88 @@ impl Component for AppModel {
                         },
                     },
                 },
+
+                // —— History page ——
+                gtk::ScrolledWindow {
+                    set_vexpand: true,
+                    set_hexpand: true,
+                    set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
+                    #[watch]
+                    set_visible: model.is_history_page(),
+
+                    gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_spacing: 12,
+                        set_margin_top: 18,
+                        set_margin_bottom: 28,
+                        set_margin_start: 20,
+                        set_margin_end: 20,
+
+                        gtk::Label {
+                            set_label: "History",
+                            add_css_class: "brand-title",
+                            set_halign: gtk::Align::Start,
+                            set_xalign: 0.0,
+                        },
+                        gtk::Label {
+                            set_label: "Recent lookups and scans (newest first). Tap a row to open.",
+                            add_css_class: "dim-label",
+                            set_halign: gtk::Align::Start,
+                            set_wrap: true,
+                            set_xalign: 0.0,
+                        },
+                        gtk::Button {
+                            set_label: "Clear history",
+                            add_css_class: "destructive-action",
+                            set_halign: gtk::Align::Start,
+                            connect_clicked[sender] => move |_| {
+                                sender.input(Msg::ClearHistory);
+                            },
+                        },
+                        #[name = "history_list"]
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 6,
+                        },
+                    },
+                },
+
+                // —— Favorites page ——
+                gtk::ScrolledWindow {
+                    set_vexpand: true,
+                    set_hexpand: true,
+                    set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
+                    #[watch]
+                    set_visible: model.is_favorites_page(),
+
+                    gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_spacing: 12,
+                        set_margin_top: 18,
+                        set_margin_bottom: 28,
+                        set_margin_start: 20,
+                        set_margin_end: 20,
+
+                        gtk::Label {
+                            set_label: "Favorites",
+                            add_css_class: "brand-title",
+                            set_halign: gtk::Align::Start,
+                            set_xalign: 0.0,
+                        },
+                        gtk::Label {
+                            set_label: "Products you starred. Tap a row to open, or remove from here.",
+                            add_css_class: "dim-label",
+                            set_halign: gtk::Align::Start,
+                            set_wrap: true,
+                            set_xalign: 0.0,
+                        },
+                        #[name = "favorites_list"]
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 6,
+                        },
+                    },
+                },
             },
         }
     }
@@ -780,7 +1068,8 @@ impl Component for AppModel {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let initial = init
+        let (barcode_init, page_init) = init;
+        let initial = barcode_init
             .as_deref()
             .map(off::normalize_barcode)
             .filter(|s| !s.is_empty());
@@ -814,12 +1103,27 @@ impl Component for AppModel {
             profile_ids: vec![],
             active_profile_index: 0,
             search_hits: vec![],
+            page: page_init,
+            history: HistoryStore::open_default().unwrap_or_else(|e| {
+                eprintln!("history store: {e}");
+                let dir = std::env::temp_dir().join(format!("lf-hist-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&dir);
+                HistoryStore::open(dir.join("history.json"))
+            }),
+            favorites: FavoritesStore::open_default().unwrap_or_else(|e| {
+                eprintln!("favorites store: {e}");
+                let dir = std::env::temp_dir().join(format!("lf-fav-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&dir);
+                FavoritesStore::open(dir.join("favorites.json"))
+            }),
         };
         model.rebuild_profile_lists();
 
         let widgets = view_output!();
         load_css();
         logo::apply_window_icon(&root);
+        rebuild_history_list(&widgets.history_list, model.history.entries(), &sender);
+        rebuild_favorites_list(&widgets.favorites_list, model.favorites.entries(), &sender);
 
         // Populate profile dropdown model
         let string_list = gtk::StringList::new(
@@ -942,7 +1246,14 @@ impl Component for AppModel {
                     self.status_kind = StatusKind::Success;
                     self.product_image = texture_from_bytes(info.image_bytes.as_deref());
                     self.product = Some(info);
+                    self.page = AppPage::Lookup;
                     self.rescore();
+                    self.record_current_to_history();
+                    rebuild_history_list(
+                        &widgets.history_list,
+                        self.history.entries(),
+                        &sender,
+                    );
                     if let Some(s) = &self.summary {
                         self.status_text = format!(
                             "Product found — {} ({}) via “{}”.",
@@ -1007,6 +1318,8 @@ impl Component for AppModel {
             }
             Msg::Rescore => {
                 self.rescore();
+                self.record_current_to_history();
+                rebuild_history_list(&widgets.history_list, self.history.entries(), &sender);
                 if let Some(s) = &self.summary {
                     self.status_text = format!(
                         "Rescored — {} ({}) via “{}”.",
@@ -1040,6 +1353,80 @@ impl Component for AppModel {
                 }
                 append_explanation(&widgets.explain_list, &lines);
                 self.status_text = "Compared all profiles on the current product.".into();
+            }
+            Msg::ShowPage(page) => {
+                self.page = page;
+                if page == AppPage::History {
+                    rebuild_history_list(
+                        &widgets.history_list,
+                        self.history.entries(),
+                        &sender,
+                    );
+                } else if page == AppPage::Favorites {
+                    rebuild_favorites_list(
+                        &widgets.favorites_list,
+                        self.favorites.entries(),
+                        &sender,
+                    );
+                }
+            }
+            Msg::ToggleFavorite => {
+                let (Some(product), Some(summary)) = (&self.product, &self.summary) else {
+                    self.status_text = "Look up a product before favoriting.".into();
+                    self.update_view(widgets, sender);
+                    return;
+                };
+                let entry = LibraryEntry::from_scored(product, summary, self.store.active_id());
+                match self.favorites.toggle(entry) {
+                    Ok(true) => {
+                        self.status_text = "Added to favorites.".into();
+                    }
+                    Ok(false) => {
+                        self.status_text = "Removed from favorites.".into();
+                    }
+                    Err(e) => {
+                        self.status_text = format!("Favorites error: {e}");
+                    }
+                }
+                rebuild_favorites_list(
+                    &widgets.favorites_list,
+                    self.favorites.entries(),
+                    &sender,
+                );
+            }
+            Msg::OpenLibraryBarcode(code) => {
+                self.page = AppPage::Lookup;
+                self.barcode = off::normalize_barcode(&code);
+                widgets.barcode_entry.set_text(&self.barcode);
+                sender.input(Msg::Lookup);
+            }
+            Msg::ClearHistory => {
+                if let Err(e) = self.history.clear() {
+                    self.status_text = format!("Could not clear history: {e}");
+                } else {
+                    self.status_text = "History cleared.".into();
+                }
+                rebuild_history_list(&widgets.history_list, self.history.entries(), &sender);
+            }
+            Msg::RemoveFavorite(code) => {
+                if let Err(e) = self.favorites.remove(&code) {
+                    self.status_text = format!("Could not remove favorite: {e}");
+                } else {
+                    self.status_text = "Removed from favorites.".into();
+                }
+                rebuild_favorites_list(
+                    &widgets.favorites_list,
+                    self.favorites.entries(),
+                    &sender,
+                );
+            }
+            Msg::RefreshLibraryLists => {
+                rebuild_history_list(&widgets.history_list, self.history.entries(), &sender);
+                rebuild_favorites_list(
+                    &widgets.favorites_list,
+                    self.favorites.entries(),
+                    &sender,
+                );
             }
             Msg::ScanCamera => {
                 if !self.scanning {
@@ -1268,6 +1655,11 @@ fn load_css() {
         .status-err { color: #a40000; }
         .status-loading { opacity: 0.85; }
         .status-idle { opacity: 0.8; }
+        .nav-inactive { opacity: 0.85; }
+        .library-row {
+            padding: 6px 0;
+            border-bottom: 1px solid alpha(@card_fg_color, 0.08);
+        }
         "#,
     );
     gtk::style_context_add_provider_for_display(

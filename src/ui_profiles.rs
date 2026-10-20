@@ -29,12 +29,19 @@ const ATTR_CHOICES: &[(&str, &str)] = &[
 #[derive(Debug, Clone)]
 pub enum ProfilePageEvent {
     Select(String),
+    /// Open the New-name dialog (non-blocking).
     New,
+    /// Create after the async name dialog completes.
+    NewNamed(String),
     SetActive,
     Duplicate,
+    /// Duplicate after the async name dialog completes.
+    DuplicateNamed(String),
     StartEdit,
     Export,
     Import,
+    /// Import after the async path dialog completes.
+    ImportPath(String),
     Delete,
     RestoreBuiltins,
     CancelEdit,
@@ -58,6 +65,15 @@ fn clear_container(container: &gtk::Box) {
     }
 }
 
+fn profile_row_title(mark: &str, name: &str) -> String {
+    format!("{mark}  {name}")
+}
+
+fn profile_row_sub(id: &str, version: u32, builtin: bool) -> String {
+    let kind = if builtin { "built-in" } else { "custom" };
+    format!("{id} · v{version} · {kind}")
+}
+
 /// Rebuild the selectable profile list (built-in + custom, active marked).
 pub fn rebuild_profile_list(
     container: &gtk::Box,
@@ -78,14 +94,13 @@ pub fn rebuild_profile_list(
         }
 
         let mark = if p.id == active { "●" } else { "○" };
-        let kind = if p.builtin { "built-in" } else { "custom" };
-        let title = gtk::Label::new(Some(&format!("{mark}  {}", p.name)));
+        let title = gtk::Label::new(Some(&profile_row_title(mark, &p.name)));
         title.add_css_class("profile-row-title");
         title.set_halign(gtk::Align::Start);
         title.set_xalign(0.0);
         title.set_wrap(true);
 
-        let sub = gtk::Label::new(Some(&format!("{} · v{} · {kind}", p.id, p.version)));
+        let sub = gtk::Label::new(Some(&profile_row_sub(&p.id, p.version, p.builtin)));
         sub.add_css_class("dim-label");
         sub.set_halign(gtk::Align::Start);
         sub.set_xalign(0.0);
@@ -98,12 +113,64 @@ pub fn rebuild_profile_list(
         btn.set_child(Some(&row));
         btn.add_css_class("flat");
         btn.set_hexpand(true);
+        // Widget name holds the profile id for in-place relabel.
+        btn.set_widget_name(&p.id);
         let id = p.id.clone();
         let emit = Rc::clone(emit);
         btn.connect_clicked(move |_| {
             emit(ProfilePageEvent::Select(id.clone()));
         });
         container.append(&btn);
+    }
+}
+
+/// Update ●/○ / selection styling without destroying buttons (Set active safe).
+pub fn relabel_profile_list(
+    container: &gtk::Box,
+    store: &ProfileStore,
+    selected_id: Option<&str>,
+) {
+    let active = store.active_id().to_string();
+    let selected = selected_id.unwrap_or(&active);
+    let mut child = container.first_child();
+    while let Some(widget) = child {
+        let next = widget.next_sibling();
+        let Some(btn) = widget.downcast_ref::<gtk::Button>() else {
+            child = next;
+            continue;
+        };
+        let id = btn.widget_name().to_string();
+        if id.is_empty() {
+            child = next;
+            continue;
+        }
+        let Some(row) = btn.child().and_then(|c| c.downcast::<gtk::Box>().ok()) else {
+            child = next;
+            continue;
+        };
+        if id == selected {
+            row.add_css_class("profile-row-selected");
+        } else {
+            row.remove_css_class("profile-row-selected");
+        }
+        let mark = if id == active { "●" } else { "○" };
+        let name = store
+            .get(&id)
+            .map(|p| p.name.as_str())
+            .unwrap_or(id.as_str());
+        let builtin = store.get(&id).map(|p| p.builtin).unwrap_or(false);
+        let version = store.get(&id).map(|p| p.version).unwrap_or(1);
+        if let Some(title) = row.first_child().and_then(|c| c.downcast::<gtk::Label>().ok()) {
+            title.set_text(&profile_row_title(mark, name));
+        }
+        if let Some(sub) = row
+            .first_child()
+            .and_then(|c| c.next_sibling())
+            .and_then(|c| c.downcast::<gtk::Label>().ok())
+        {
+            sub.set_text(&profile_row_sub(&id, version, builtin));
+        }
+        child = next;
     }
 }
 
@@ -429,13 +496,14 @@ fn field_label(text: &str) -> gtk::Label {
     lab
 }
 
-/// Minimal text prompt (single field) — OK on small screens.
-pub fn ask_text(
+/// Non-blocking text prompt — never pumps/`recv` on the UI thread.
+pub fn ask_text_async(
     parent: &impl IsA<gtk::Window>,
     title: &str,
     placeholder: &str,
     initial: &str,
-) -> Option<String> {
+    on_done: impl FnOnce(Option<String>) + 'static,
+) {
     let dialog = gtk::Window::builder()
         .title(title)
         .transient_for(parent)
@@ -467,33 +535,34 @@ pub fn ask_text(
     root.append(&btn_row);
     dialog.set_child(Some(&root));
 
-    let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
-    ok.connect_clicked({
+    let done = Rc::new(RefCell::new(Some(on_done)));
+    let finish: Rc<dyn Fn(Option<String>)> = {
+        let done = Rc::clone(&done);
         let dialog = dialog.clone();
+        Rc::new(move |value: Option<String>| {
+            if let Some(cb) = done.borrow_mut().take() {
+                cb(value);
+            }
+            dialog.destroy();
+        })
+    };
+
+    ok.connect_clicked({
         let entry = entry.clone();
-        let tx = tx.clone();
+        let finish = Rc::clone(&finish);
         move |_| {
             let t = entry.text().to_string();
-            let _ = tx.send(if t.trim().is_empty() {
-                None
-            } else {
-                Some(t)
-            });
-            dialog.close();
+            finish(if t.trim().is_empty() { None } else { Some(t) });
         }
     });
     cancel.connect_clicked({
-        let dialog = dialog.clone();
-        let tx = tx.clone();
-        move |_| {
-            let _ = tx.send(None);
-            dialog.close();
-        }
+        let finish = Rc::clone(&finish);
+        move |_| finish(None)
     });
     dialog.connect_close_request({
-        let tx = tx.clone();
+        let finish = Rc::clone(&finish);
         move |_| {
-            let _ = tx.send(None);
+            finish(None);
             gtk::glib::Propagation::Proceed
         }
     });
@@ -504,29 +573,20 @@ pub fn ask_text(
 
     dialog.present();
     entry.grab_focus();
-    let result = recv_modal(&rx);
-    dialog.destroy();
-    result
 }
 
-/// Path prompt for Import JSON.
-pub fn ask_path(parent: &impl IsA<gtk::Window>) -> Option<String> {
-    ask_text(
+/// Path prompt for Import JSON (async).
+pub fn ask_path_async(
+    parent: &impl IsA<gtk::Window>,
+    on_done: impl FnOnce(Option<String>) + 'static,
+) {
+    ask_text_async(
         parent,
         "Import profile JSON",
         "Absolute path to .json",
         "",
+        on_done,
     )
-}
-
-fn recv_modal<T>(rx: &std::sync::mpsc::Receiver<T>) -> T {
-    loop {
-        if let Ok(v) = rx.try_recv() {
-            return v;
-        }
-        while gtk::glib::MainContext::default().iteration(false) {}
-        std::thread::sleep(std::time::Duration::from_millis(16));
-    }
 }
 
 fn simplify_rules(rules: &[ThresholdRule]) -> (f64, f64, f64) {

@@ -38,6 +38,12 @@ pub enum Msg {
     ProfileSelected(u32),
     OpenProfilesPage,
     Profiles(ui_profiles::ProfilePageEvent),
+    /// Rebuild Profiles list/actions after the current update returns (avoids GTK freezes).
+    RefreshProfilesUi,
+    /// Apply profile DropDown model outside a Profiles update.
+    SyncProfileDropdown,
+    /// In-place ●/○ / selection CSS refresh (no widget destroy).
+    RelabelProfiles,
     Rescore,
     CompareProfiles,
     ShowPage(AppPage),
@@ -94,7 +100,7 @@ pub struct AppModel {
     last_result: Option<ScoreResult>,
     product_image: Option<gdk::Texture>,
     logo: Option<gdk::Texture>,
-    camera_ok: bool,
+    camera_probe: camera::CameraProbe,
     scanning: bool,
     preview: Option<gdk::Texture>,
     scan_stop: Option<Arc<AtomicBool>>,
@@ -111,6 +117,11 @@ pub struct AppModel {
     profiles_status: String,
     editing_profile: bool,
     profile_editor: Option<ui_profiles::EditorHandle>,
+    /// Ignore DropDown notify while we rebuild its model programmatically.
+    suppress_profile_dropdown: bool,
+    /// Steps remaining for LIBREFOOD_SMOKE_SET_ACTIVE regression.
+    smoke_set_active_left: Option<u32>,
+    smoke_tick: u32,
 }
 
 impl AppModel {
@@ -264,11 +275,11 @@ impl AppModel {
     }
 
     fn scan_label(&self) -> &'static str {
-        if self.camera_ok {
-            "Scan with camera"
-        } else {
-            "Camera unavailable — type a barcode"
-        }
+        self.camera_probe.scan_button_label()
+    }
+
+    fn camera_ok(&self) -> bool {
+        self.camera_probe.is_ready()
     }
 
     fn is_lookup_page(&self) -> bool {
@@ -329,9 +340,19 @@ fn clear_box(container: &gtk::Box) {
     }
 }
 
-fn profiles_emit(sender: &ComponentSender<AppModel>) -> std::rc::Rc<dyn Fn(ui_profiles::ProfilePageEvent)> {
+/// Defer profile UI events until after the emitting widget's signal returns.
+/// Rebuilding lists/actions synchronously from a button click destroys that
+/// button mid-handler and freezes GTK (Force Quit / Wait).
+fn profiles_emit(
+    sender: &ComponentSender<AppModel>,
+) -> std::rc::Rc<dyn Fn(ui_profiles::ProfilePageEvent)> {
     let sender = sender.clone();
-    std::rc::Rc::new(move |ev| sender.input(Msg::Profiles(ev)))
+    std::rc::Rc::new(move |ev| {
+        let sender = sender.clone();
+        gtk::glib::idle_add_local_once(move || {
+            sender.input(Msg::Profiles(ev));
+        });
+    })
 }
 
 fn refresh_profiles_page(
@@ -346,21 +367,50 @@ fn refresh_profiles_page(
         model.selected_profile_id.as_deref(),
         &emit,
     );
-    ui_profiles::rebuild_profile_actions(&widgets.profiles_actions, &emit);
+    // Actions are static — only build once (or when empty). Rebuilding FlowBox
+    // on every Set active races GTK layout and freezes the UI.
+    if widgets.profiles_actions.first_child().is_none() {
+        ui_profiles::rebuild_profile_actions(&widgets.profiles_actions, &emit);
+    }
 }
 
-fn sync_profile_dropdown(widgets: &AppModelWidgets, model: &AppModel) {
-    let string_list = gtk::StringList::new(
-        &model
-            .profile_names
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>(),
-    );
-    widgets.profile_dropdown.set_model(Some(&string_list));
-    widgets
+fn sync_profile_dropdown(widgets: &AppModelWidgets, model: &mut AppModel) {
+    model.suppress_profile_dropdown = true;
+    // Only rebuild the StringList when names/ids actually changed.
+    let n = widgets
         .profile_dropdown
-        .set_selected(model.active_profile_index);
+        .model()
+        .map(|m| m.n_items())
+        .unwrap_or(0);
+    if n != model.profile_names.len() as u32 {
+        let string_list = gtk::StringList::new(
+            &model
+                .profile_names
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+        );
+        widgets.profile_dropdown.set_model(Some(&string_list));
+    }
+    if widgets.profile_dropdown.selected() != model.active_profile_index {
+        widgets
+            .profile_dropdown
+            .set_selected(model.active_profile_index);
+    }
+    model.suppress_profile_dropdown = false;
+}
+
+fn schedule_profiles_ui_refresh(sender: &ComponentSender<AppModel>) {
+    queue_msg(sender, Msg::RefreshProfilesUi);
+}
+
+/// Never call `sender.input` directly from inside `update` — Relm4 may re-enter
+/// while `widgets` is still borrowed and freeze the GTK main loop.
+fn queue_msg(sender: &ComponentSender<AppModel>, msg: Msg) {
+    let sender = sender.clone();
+    gtk::glib::idle_add_local_once(move || {
+        sender.input(msg);
+    });
 }
 
 fn handle_profiles_event(
@@ -376,17 +426,23 @@ fn handle_profiles_event(
     match ev {
         ProfilePageEvent::Select(id) => {
             model.selected_profile_id = Some(id);
-            refresh_profiles_page(widgets, model, &sender);
+            queue_msg(&sender, Msg::RelabelProfiles);
         }
         ProfilePageEvent::New => {
-            let Some(name) = ui_profiles::ask_text(
+            let sender = sender.clone();
+            ui_profiles::ask_text_async(
                 root,
                 "New scoring profile",
                 "Name",
                 "My scoring profile",
-            ) else {
-                return;
-            };
+                move |name| {
+                    if let Some(name) = name {
+                        sender.input(Msg::Profiles(ProfilePageEvent::NewNamed(name)));
+                    }
+                },
+            );
+        }
+        ProfilePageEvent::NewNamed(name) => {
             match model.store.create_new(&name) {
                 Ok(created) => {
                     model.selected_profile_id = Some(created.id.clone());
@@ -394,7 +450,6 @@ fn handle_profiles_event(
                     sync_profile_dropdown(widgets, model);
                     model.profiles_status =
                         format!("Created “{}” — opening editor.", created.name);
-                    // Enter editor immediately.
                     if let Some(profile) = model.store.get(&created.id).cloned() {
                         model.editing_profile = true;
                         model.profile_editor = Some(ui_profiles::mount_profile_editor(
@@ -404,7 +459,7 @@ fn handle_profiles_event(
                             &emit,
                         ));
                     }
-                    refresh_profiles_page(widgets, model, &sender);
+                    schedule_profiles_ui_refresh(&sender);
                 }
                 Err(e) => model.profiles_status = e,
             }
@@ -417,11 +472,11 @@ fn handle_profiles_event(
             match model.store.set_active(&id) {
                 Ok(()) => {
                     model.rebuild_profile_lists();
-                    sync_profile_dropdown(widgets, model);
                     model.profiles_status = format!("Active profile: {id}");
-                    refresh_profiles_page(widgets, model, &sender);
+                    queue_msg(&sender, Msg::RelabelProfiles);
+                    queue_msg(&sender, Msg::SyncProfileDropdown);
                     if model.product.is_some() {
-                        sender.input(Msg::Rescore);
+                        queue_msg(&sender, Msg::Rescore);
                     }
                 }
                 Err(e) => model.profiles_status = e,
@@ -440,9 +495,22 @@ fn handle_profiles_event(
                     .map(|p| p.name.as_str())
                     .unwrap_or("Profile")
             );
-            let Some(name) =
-                ui_profiles::ask_text(root, "Duplicate profile", "Name", &default_name)
-            else {
+            let sender = sender.clone();
+            ui_profiles::ask_text_async(
+                root,
+                "Duplicate profile",
+                "Name",
+                &default_name,
+                move |name| {
+                    if let Some(name) = name {
+                        sender.input(Msg::Profiles(ProfilePageEvent::DuplicateNamed(name)));
+                    }
+                },
+            );
+        }
+        ProfilePageEvent::DuplicateNamed(name) => {
+            let Some(id) = model.selected_profile_id.clone() else {
+                model.profiles_status = "Select a profile first.".into();
                 return;
             };
             match model.store.duplicate(&id, &name) {
@@ -452,7 +520,7 @@ fn handle_profiles_event(
                     model.rebuild_profile_lists();
                     sync_profile_dropdown(widgets, model);
                     model.profiles_status = format!("Duplicated as {}", p.id);
-                    refresh_profiles_page(widgets, model, &sender);
+                    schedule_profiles_ui_refresh(&sender);
                 }
                 Err(e) => model.profiles_status = e,
             }
@@ -494,23 +562,26 @@ fn handle_profiles_event(
             }
         }
         ProfilePageEvent::Import => {
-            let Some(path) = ui_profiles::ask_path(root) else {
-                return;
-            };
-            match std::fs::read_to_string(path.trim()) {
-                Ok(text) => match model.store.import_json(&text) {
-                    Ok(p) => {
-                        model.selected_profile_id = Some(p.id.clone());
-                        model.rebuild_profile_lists();
-                        sync_profile_dropdown(widgets, model);
-                        model.profiles_status = format!("Imported {}", p.id);
-                        refresh_profiles_page(widgets, model, &sender);
-                    }
-                    Err(e) => model.profiles_status = e,
-                },
-                Err(e) => model.profiles_status = e.to_string(),
-            }
+            let sender = sender.clone();
+            ui_profiles::ask_path_async(root, move |path| {
+                if let Some(path) = path {
+                    sender.input(Msg::Profiles(ProfilePageEvent::ImportPath(path)));
+                }
+            });
         }
+        ProfilePageEvent::ImportPath(path) => match std::fs::read_to_string(path.trim()) {
+            Ok(text) => match model.store.import_json(&text) {
+                Ok(p) => {
+                    model.selected_profile_id = Some(p.id.clone());
+                    model.rebuild_profile_lists();
+                    sync_profile_dropdown(widgets, model);
+                    model.profiles_status = format!("Imported {}", p.id);
+                    schedule_profiles_ui_refresh(&sender);
+                }
+                Err(e) => model.profiles_status = e,
+            },
+            Err(e) => model.profiles_status = e.to_string(),
+        },
         ProfilePageEvent::Delete => {
             let Some(id) = model.selected_profile_id.clone() else {
                 model.profiles_status = "Select a profile first.".into();
@@ -522,7 +593,7 @@ fn handle_profiles_event(
                     model.rebuild_profile_lists();
                     sync_profile_dropdown(widgets, model);
                     model.profiles_status = "Removed user override / custom profile.".into();
-                    refresh_profiles_page(widgets, model, &sender);
+                    schedule_profiles_ui_refresh(&sender);
                 }
                 Err(e) => model.profiles_status = e,
             }
@@ -535,7 +606,7 @@ fn handle_profiles_event(
                 model.profiles_status =
                     "Built-in profiles restored from embedded defaults (user customs kept)."
                         .into();
-                refresh_profiles_page(widgets, model, &sender);
+                schedule_profiles_ui_refresh(&sender);
             }
             Err(e) => model.profiles_status = e,
         },
@@ -547,7 +618,7 @@ fn handle_profiles_event(
                 &widgets.profiles_editor_footer,
             );
             model.profiles_status = "Edit cancelled.".into();
-            refresh_profiles_page(widgets, model, &sender);
+            schedule_profiles_ui_refresh(&sender);
         }
         ProfilePageEvent::SaveEdit => {
             let Some(editor) = model.profile_editor.as_ref() else {
@@ -570,9 +641,9 @@ fn handle_profiles_event(
                                 &widgets.profiles_editor_footer,
                             );
                             model.profiles_status = format!("Saved `{id}`.");
-                            refresh_profiles_page(widgets, model, &sender);
+                            schedule_profiles_ui_refresh(&sender);
                             if model.product.is_some() {
-                                sender.input(Msg::Rescore);
+                                queue_msg(&sender, Msg::Rescore);
                             }
                         }
                         Err(e) => model.profiles_status = e,
@@ -996,7 +1067,7 @@ impl Component for AppModel {
                             set_label: model.scan_label(),
                             set_hexpand: true,
                             #[watch]
-                            set_sensitive: model.camera_ok && !model.scanning,
+                            set_sensitive: model.camera_ok() && !model.scanning,
                             #[watch]
                             set_visible: !model.scanning,
                             connect_clicked[sender] => move |_| {
@@ -1482,7 +1553,7 @@ impl Component for AppModel {
             last_result: None,
             product_image: None,
             logo: logo::logo_texture(128),
-            camera_ok: camera::camera_available(),
+            camera_probe: camera::camera_probe(),
             scanning: false,
             preview: None,
             scan_stop: None,
@@ -1509,6 +1580,17 @@ impl Component for AppModel {
             profiles_status: "Select a profile, then Edit — editor opens full-page.".into(),
             editing_profile: false,
             profile_editor: None,
+            suppress_profile_dropdown: false,
+            smoke_set_active_left: if std::env::var("LIBREFOOD_SMOKE_SET_ACTIVE")
+                .ok()
+                .as_deref()
+                == Some("1")
+            {
+                Some(4)
+            } else {
+                None
+            },
+            smoke_tick: 0,
         };
         model.rebuild_profile_lists();
         model.selected_profile_id = Some(model.store.active_id().to_string());
@@ -1534,6 +1616,13 @@ impl Component for AppModel {
                 gtk::glib::idle_add_local_once(move || {
                     sender2.input(Msg::Profiles(ui_profiles::ProfilePageEvent::StartEdit));
                 });
+            }
+            if std::env::var("LIBREFOOD_SMOKE_SET_ACTIVE").ok().as_deref() == Some("1") {
+                eprintln!(
+                    "SMOKE_SET_ACTIVE_START profiles={} page={:?}",
+                    model.store.list().len(),
+                    model.page
+                );
             }
         }
 
@@ -1719,12 +1808,14 @@ impl Component for AppModel {
                 }
             },
             Msg::ProfileSelected(idx) => {
-                if let Some(id) = self.profile_ids.get(idx as usize).cloned() {
-                    if id != self.store.active_id() {
-                        let _ = self.store.set_active(&id);
-                        self.active_profile_index = idx;
-                        if self.product.is_some() {
-                            sender.input(Msg::Rescore);
+                if !self.suppress_profile_dropdown {
+                    if let Some(id) = self.profile_ids.get(idx as usize).cloned() {
+                        if id != self.store.active_id() {
+                            let _ = self.store.set_active(&id);
+                            self.active_profile_index = idx;
+                            if self.product.is_some() {
+                                queue_msg(&sender, Msg::Rescore);
+                            }
                         }
                     }
                 }
@@ -1733,10 +1824,23 @@ impl Component for AppModel {
                 self.editing_profile = false;
                 self.profile_editor = None;
                 ui_profiles::clear_editor(&widgets.profiles_editor_body, &widgets.profiles_editor_footer);
-                sender.input(Msg::ShowPage(AppPage::Profiles));
+                queue_msg(&sender, Msg::ShowPage(AppPage::Profiles));
             }
             Msg::Profiles(ev) => {
                 handle_profiles_event(self, widgets, root, sender.clone(), ev);
+            }
+            Msg::RefreshProfilesUi => {
+                refresh_profiles_page(widgets, self, &sender);
+            }
+            Msg::SyncProfileDropdown => {
+                sync_profile_dropdown(widgets, self);
+            }
+            Msg::RelabelProfiles => {
+                ui_profiles::relabel_profile_list(
+                    &widgets.profiles_list,
+                    &self.store,
+                    self.selected_profile_id.as_deref(),
+                );
             }
             Msg::Rescore => {
                 self.rescore();
@@ -1857,10 +1961,9 @@ impl Component for AppModel {
             }
             Msg::ScanCamera => {
                 if !self.scanning {
-                    if !self.camera_ok {
+                    if !self.camera_ok() {
                         self.status_kind = StatusKind::Error;
-                        self.status_text =
-                            "No camera detected. Type or paste a barcode instead.".into();
+                        self.status_text = self.camera_probe.unavailable_message();
                     } else {
                         let stop = Arc::new(AtomicBool::new(false));
                         self.scan_stop = Some(Arc::clone(&stop));
@@ -1945,6 +2048,36 @@ impl Component for AppModel {
                 let next = UiWidth::from_px(w);
                 if next != self.width_class {
                     self.width_class = next;
+                }
+                // Drive Set active hang smoke off the existing width poller (proves
+                // the main loop is alive and exercises the real Profiles path).
+                if let Some(left) = self.smoke_set_active_left {
+                    if left == 0 {
+                        eprintln!("SMOKE_SET_ACTIVE_OK");
+                        std::process::exit(0);
+                    }
+                    self.smoke_tick = self.smoke_tick.wrapping_add(1);
+                    // Fire every ~4th poll (~1s) so GTK can settle.
+                    if self.smoke_tick > 4 && self.smoke_tick % 4 == 0 {
+                        let ids = self.profile_ids.clone();
+                        if ids.is_empty() {
+                            eprintln!("SMOKE_SET_ACTIVE_FAIL empty profiles");
+                            std::process::exit(1);
+                        }
+                        let idx = (4 - left) as usize % ids.len();
+                        let id = ids[idx].clone();
+                        eprintln!("SMOKE_SET_ACTIVE_STEP left={left} id={id}");
+                        self.selected_profile_id = Some(id.clone());
+                        self.smoke_set_active_left = Some(left - 1);
+                        queue_msg(
+                            &sender,
+                            Msg::Profiles(ui_profiles::ProfilePageEvent::Select(id)),
+                        );
+                        queue_msg(
+                            &sender,
+                            Msg::Profiles(ui_profiles::ProfilePageEvent::SetActive),
+                        );
+                    }
                 }
             }
         }

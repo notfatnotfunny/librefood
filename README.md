@@ -118,9 +118,26 @@ API used: `https://world.openfoodfacts.org/api/v2/product/{barcode}.json`
 
 ## Camera caveats
 
-- Needs a V4L2 device (typically `/dev/video0`) and permission for the `video` group (or equivalent ACL).
+- Linux uses V4L2 via [nokhwa](https://crates.io/crates/nokhwa) (`input-native` / `input-v4l`). Librefood enumerates `/dev/video*` and tries each device (not only `video0`).
+- Needs permission for the `video` group (or an ACL that allows read/write on the device node).
 - Decoding is best-effort: hold the code steady, fill the guide, use good lighting.
-- Headless / VM environments often have **no camera**; typed barcodes remain fully supported.
+- If a camera node exists but open fails (permissions / busy), the UI says so; typed barcodes remain fully supported. Headless / VM environments often have **no camera**.
+
+### Alpine Linux (incl. aarch64)
+
+```sh
+# Build / runtime deps (names may vary slightly by Alpine release)
+apk add build-base rust cargo pkgconf \
+  gtk4.0-dev libadwaita-dev \
+  v4l-utils-dev v4l-utils \
+  clang-libclang   # if a dependency needs libclang
+
+# Runtime: user must reach V4L2 nodes
+adduser "$USER" video
+# or: setfacl -m u:"$USER":rw /dev/video0
+```
+
+`v4l2-ctl --list-devices` is useful to confirm nodes. On musl/ARM, prefer stock Alpine packages over ad-hoc x86 blobs; nokhwa’s native V4L2 backend is architecture-agnostic.
 
 ## License
 

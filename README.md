@@ -6,15 +6,32 @@ Scan a barcode with a webcam (live preview + centering guide), or type/paste an 
 
 **App ID:** `org.librefood.Librefood`
 
-## Requirements (Linux)
+## Quick install (build from source)
 
-- Rust toolchain (1.85+ recommended)
-- System packages (Arch):
+**Arch Linux** dependencies:
 
 ```bash
 sudo pacman -S --needed gtk4 libadwaita pkgconf base-devel
-# Optional: v4l-utils for camera debugging
+# Rust: https://rustup.rs  (1.85+ recommended)
 ```
+
+Clone, build, run:
+
+```bash
+git clone https://github.com/notfatnotfunny/librefood.git
+cd librefood
+cargo build --release
+./target/release/librefood
+
+# Or:
+cargo run --release
+# Optional: look up a barcode on launch
+cargo run --release -- --barcode 3017620422003
+```
+
+Optional local Flatpak build: see [Flatpak](#flatpak) below.
+
+## Requirements (other distros)
 
 Debian/Ubuntu:
 
@@ -23,16 +40,6 @@ sudo apt install build-essential pkg-config libgtk-4-dev libadwaita-1-dev
 ```
 
 Camera scanning uses [nokhwa](https://crates.io/crates/nokhwa) (V4L2) and [rxing](https://crates.io/crates/rxing). No Open Food Facts API key is required.
-
-## Build & run (native)
-
-```bash
-cd ~/Documents/codeIsFun/librefood   # or your clone path
-cargo run --release
-
-# Optional: look up a barcode immediately on launch
-cargo run --release -- --barcode 3017620422003
-```
 
 Window minimum width is ~360px; the input row stacks vertically on narrow widths.
 
@@ -69,15 +76,12 @@ flatpak install --user flathub \
 ### Build, install, run (local)
 
 ```bash
-cd ~/Documents/codeIsFun/librefood
+cd librefood   # or your clone path
 
-# Build into ./build-dir and export a local repo
 flatpak run org.flatpak.Builder --user --install --force-clean \
   build-dir org.librefood.Librefood.yml
 
-# Run
 flatpak run org.librefood.Librefood
-
 # Optional barcode on launch
 flatpak run org.librefood.Librefood --barcode 3017620422003
 ```
@@ -86,13 +90,13 @@ The local manifest allows network during `cargo build` so crates download inside
 
 ### Flathub layout (prepared, not submitted)
 
-Flathub expects an offline Cargo build. When you have a public GitHub repo:
+Flathub expects an offline Cargo build:
 
 1. Generate `cargo-sources.json` with [flatpak-cargo-generator](https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo).
 2. Point the module `sources` at a git tag / archive **plus** `cargo-sources.json`, and use `cargo --offline build --release --locked`.
-3. Open a PR against [flathub/flathub](https://github.com/flathub/flathub) with app id `org.librefood.Librefood` (do **not** open until credentials / upstream repo exist).
+3. Open a PR against [flathub/flathub](https://github.com/flathub/flathub) with app id `org.librefood.Librefood` when ready.
 
-AppStream screenshots are omitted until a public GitHub remote can host them (required HTTPS image URLs).
+AppStream screenshots can use raw GitHub image URLs once hosted under this repo (e.g. `data/screenshots/`).
 
 ## Project layout
 

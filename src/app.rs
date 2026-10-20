@@ -2131,13 +2131,14 @@ fn format_camera_err(e: CameraError) -> String {
                 || lower.contains("eacces")
             {
                 format!(
-                    "Camera permission denied ({msg}). On Alpine: \
+                    "Camera permission denied. On Alpine: \
                      `sudo adduser $USER video`, then re-login. Or type a barcode."
                 )
             } else if lower.contains("busy") || lower.contains("ebusy") {
-                format!("Camera busy ({msg}). Close other apps using it, or type a barcode.")
+                format!("Camera busy. Close other apps using it, or type a barcode.")
             } else {
-                format!("Could not open camera ({msg}). Type a barcode instead.")
+                // msg is already a compact summary from camera::open_first_working
+                format!("Could not open camera. {msg} Or type a barcode.")
             }
         }
         CameraError::Capture(msg) => {

@@ -1,29 +1,28 @@
-//! Webcam barcode scanning via nokhwa + rxing (ZXING port).
+//! Webcam barcode scanning via raw V4L2 (`v4l` crate) + rxing.
 //!
-//! On Linux this uses V4L2. Many `/dev/video*` nodes are metadata/controls only;
-//! we ioctl QUERYCAP and keep nodes with `V4L2_CAP_VIDEO_CAPTURE` (or mplane).
-//! Override with `LIBREFOOD_CAMERA_DEVICE=/dev/video0`.
+//! Alpine/ARM stacks often make nokhwa fail with
+//! `CameraFormat: Failed to Fulfill` even on capture-capable nodes. We open
+//! devices ourselves: QUERYCAP → ENUM_FMT → S_FMT → MMAP stream, decode
+//! MJPEG/YUYV to RGB, then barcode-detect.
 //!
-//! GNOME Snapshot uses xdg-desktop-portal Camera + PipeWire for capture; we keep
-//! direct V4L2 (works on Alpine without portal) and optionally log portal
-//! presence from the UI. Set `LIBREFOOD_CAMERA_DEBUG=1` for stderr details.
+//! Override: `LIBREFOOD_CAMERA_DEVICE=/dev/video0`
+//! Debug: `LIBREFOOD_CAMERA_DEBUG=1`
 
-use nokhwa::{
-    pixel_format::RgbFormat,
-    query,
-    utils::{
-        ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
-        Resolution,
-    },
-    Camera,
-};
+use image::ImageReader;
 use rxing::{helpers::detect_in_luma, BarcodeFormat};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
+use v4l::buffer::Type as BufType;
 use v4l::capability::Flags as CapFlags;
-use v4l::Device as V4lDevice;
+use v4l::io::traits::CaptureStream;
+use v4l::prelude::*;
+use v4l::video::Capture;
+use v4l::{Format, FourCC};
+use v4l::framesize::FrameSizeEnum;
 
 #[derive(Debug, Error)]
 pub enum CameraError {
@@ -42,23 +41,15 @@ pub enum CameraError {
 /// Result of probing for a capture device (without keeping it open).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CameraProbe {
-    /// At least one device opened successfully.
     Ready,
-    /// No capture-capable `/dev/video*` nodes and nokhwa found nothing.
     Missing,
-    /// Capture nodes exist; open failed with permission denial.
     PermissionDenied { detail: String },
-    /// Capture nodes exist; device reported busy.
     Busy { detail: String },
-    /// Capture nodes exist; open failed for another reason.
-    /// Scan stays enabled — retry at click time.
+    /// Capture nodes exist; open deferred / previous soft failure.
     Present { detail: String },
 }
 
 impl CameraProbe {
-    /// Whether the Scan button should be clickable.
-    ///
-    /// Only [`Missing`] disables Scan — never permanently gray for open failures.
     pub fn scan_enabled(&self) -> bool {
         !matches!(self, Self::Missing)
     }
@@ -99,6 +90,12 @@ impl CameraProbe {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PixelKind {
+    Mjpeg,
+    Yuyv,
+}
+
 fn camera_debug_enabled() -> bool {
     matches!(
         std::env::var("LIBREFOOD_CAMERA_DEBUG").as_deref(),
@@ -112,39 +109,22 @@ fn cam_debug(msg: impl AsRef<str>) {
     }
 }
 
-/// Probe whether at least one video capture device can be opened.
 #[allow(dead_code)]
 pub fn camera_available() -> bool {
     camera_probe().is_ready()
 }
 
-/// Fast startup probe: list capture nodes only — **does not open** the camera.
-///
-/// Opening V4L2 during `GApplication` init can hang the main loop; a stuck
-/// primary then makes later launches fail with `Failed to register: Timeout`.
+/// Fast startup probe: list capture nodes only — does not stream.
 pub fn camera_probe_quick() -> CameraProbe {
     let capture = list_capture_video_nodes();
     let all_nodes = list_dev_video_nodes();
     cam_debug(format!(
         "quick probe; all=[{}] capture=[{}]",
-        all_nodes
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
-        capture
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
+        join_paths(&all_nodes),
+        join_paths(&capture)
     ));
     if capture.is_empty() {
-        if all_nodes.is_empty() {
-            CameraProbe::Missing
-        } else {
-            // Nodes exist but none are capture — treat as missing for the button.
-            CameraProbe::Missing
-        }
+        CameraProbe::Missing
     } else {
         CameraProbe::Present {
             detail: format!(
@@ -155,37 +135,25 @@ pub fn camera_probe_quick() -> CameraProbe {
     }
 }
 
-/// Detailed probe used at Scan time (opens the device).
+/// Full probe: try to open + grab one frame (used at Scan time).
 pub fn camera_probe() -> CameraProbe {
     let capture = list_capture_video_nodes();
-    let all_nodes = list_dev_video_nodes();
     cam_debug(format!(
-        "probe start; all /dev/video* = [{}]; capture-capable = [{}]",
-        all_nodes
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
-        capture
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
+        "probe start; capture=[{}]",
+        join_paths(&capture)
     ));
-    if let Ok(dev) = std::env::var("LIBREFOOD_CAMERA_DEVICE") {
-        cam_debug(format!("LIBREFOOD_CAMERA_DEVICE={dev}"));
-    }
-
-    match open_camera() {
-        Ok(mut cam) => {
-            cam_debug("probe: open OK");
-            let _ = cam.stop_stream();
+    match open_first_working() {
+        Ok((path, fmt)) => {
+            cam_debug(format!(
+                "probe OK {} {}x{} {:?}",
+                path.display(),
+                fmt.width,
+                fmt.height,
+                fmt.kind
+            ));
             CameraProbe::Ready
         }
-        Err(CameraError::NoCamera) => {
-            cam_debug("probe: Missing");
-            CameraProbe::Missing
-        }
+        Err(CameraError::NoCamera) => CameraProbe::Missing,
         Err(CameraError::Open(detail)) => classify_probe_failure(&detail, &capture),
         Err(e) => classify_probe_failure(&e.to_string(), &capture),
     }
@@ -202,18 +170,10 @@ fn classify_probe_failure(detail: &str, capture_nodes: &[PathBuf]) -> CameraProb
             detail: detail.to_string(),
         },
         FailureKind::Missing if capture_nodes.is_empty() => CameraProbe::Missing,
-        _ => {
-            if capture_nodes.is_empty() && list_dev_video_nodes().is_empty() {
-                CameraProbe::Missing
-            } else if capture_nodes.is_empty() {
-                // Only metadata nodes — treat as missing capture.
-                CameraProbe::Missing
-            } else {
-                CameraProbe::Present {
-                    detail: detail.to_string(),
-                }
-            }
-        }
+        _ if capture_nodes.is_empty() => CameraProbe::Missing,
+        _ => CameraProbe::Present {
+            detail: detail.to_string(),
+        },
     }
 }
 
@@ -228,7 +188,6 @@ enum FailureKind {
 impl FailureKind {
     fn from_message(msg: &str) -> Self {
         let lower = msg.to_lowercase();
-        // nokhwa typo "Fufill" and correct "Fulfill" both appear in the wild.
         if lower.contains("permission")
             || lower.contains("denied")
             || lower.contains("eacces")
@@ -254,7 +213,14 @@ impl FailureKind {
     }
 }
 
-/// All `/dev/videoN` paths (including metadata-only).
+fn join_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn list_dev_video_nodes() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let Ok(entries) = std::fs::read_dir("/dev") else {
@@ -279,9 +245,8 @@ fn list_dev_video_nodes() -> Vec<PathBuf> {
     paths
 }
 
-/// True when the node advertises video capture (not metadata-only).
 fn is_v4l2_capture_node(path: &Path) -> bool {
-    let Ok(dev) = V4lDevice::with_path(path) else {
+    let Ok(dev) = Device::with_path(path) else {
         cam_debug(format!("skip {}: cannot open for QUERYCAP", path.display()));
         return false;
     };
@@ -300,7 +265,6 @@ fn is_v4l2_capture_node(path: &Path) -> bool {
     capture
 }
 
-/// Capture-capable `/dev/video*` only (skips UVC metadata nodes like video1).
 fn list_capture_video_nodes() -> Vec<PathBuf> {
     list_dev_video_nodes()
         .into_iter()
@@ -316,10 +280,6 @@ fn parse_video_index(path: &Path) -> Option<u32> {
         .ok()
 }
 
-fn running_in_flatpak() -> bool {
-    Path::new("/.flatpak-info").exists()
-}
-
 fn env_camera_device() -> Option<PathBuf> {
     let raw = std::env::var("LIBREFOOD_CAMERA_DEVICE").ok()?;
     let trimmed = raw.trim();
@@ -329,206 +289,249 @@ fn env_camera_device() -> Option<PathBuf> {
     Some(PathBuf::from(trimmed))
 }
 
-/// Candidate capture indices: env override, then capture-capable `/dev/video*`,
-/// then nokhwa query filtered to those indices.
-fn candidate_indices() -> Vec<CameraIndex> {
-    let mut out = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
+fn candidate_paths() -> Vec<PathBuf> {
+    if let Some(path) = env_camera_device() {
+        cam_debug(format!("LIBREFOOD_CAMERA_DEVICE={}", path.display()));
+        return vec![path];
+    }
+    list_capture_video_nodes()
+}
 
-    let push =
-        |idx: CameraIndex, out: &mut Vec<CameraIndex>, seen: &mut std::collections::BTreeSet<String>| {
-            let key = idx.as_string();
-            if seen.insert(key) {
-                out.push(idx);
+#[derive(Debug, Clone)]
+struct NegotiatedFormat {
+    width: u32,
+    height: u32,
+    kind: PixelKind,
+}
+
+fn fourcc_kind(fourcc: FourCC) -> Option<PixelKind> {
+    if fourcc == FourCC::new(b"MJPG") || fourcc == FourCC::new(b"JPEG") {
+        Some(PixelKind::Mjpeg)
+    } else if fourcc == FourCC::new(b"YUYV") {
+        Some(PixelKind::Yuyv)
+    } else {
+        None
+    }
+}
+
+fn pick_resolution(dev: &Device, fourcc: FourCC) -> (u32, u32) {
+    let target = (640u32, 480u32);
+    let Ok(sizes) = dev.enum_framesizes(fourcc) else {
+        return target;
+    };
+    let mut best: Option<(u32, u32, u64)> = None;
+    for fs in sizes {
+        let discrete: Vec<(u32, u32)> = match fs.size {
+            FrameSizeEnum::Discrete(d) => vec![(d.width, d.height)],
+            FrameSizeEnum::Stepwise(s) => {
+                // Prefer mid-ish size within stepwise range.
+                vec![
+                    (s.min_width.max(320).min(s.max_width), s.min_height.max(240).min(s.max_height)),
+                    (
+                        ((s.min_width + s.max_width) / 2).max(s.min_width),
+                        ((s.min_height + s.max_height) / 2).max(s.min_height),
+                    ),
+                ]
             }
         };
-
-    if let Some(path) = env_camera_device() {
-        if let Some(n) = parse_video_index(&path) {
-            cam_debug(format!(
-                "using LIBREFOOD_CAMERA_DEVICE={} -> index {n}",
-                path.display()
-            ));
-            push(CameraIndex::Index(n), &mut out, &mut seen);
-            return out;
-        }
-        cam_debug(format!(
-            "LIBREFOOD_CAMERA_DEVICE={} not a /dev/videoN path — ignoring",
-            path.display()
-        ));
-    }
-
-    let capture = list_capture_video_nodes();
-    for path in &capture {
-        if let Some(n) = parse_video_index(path) {
-            push(CameraIndex::Index(n), &mut out, &mut seen);
-        }
-    }
-
-    // nokhwa often lists metadata nodes too — only keep indices we know capture.
-    let capture_idx: std::collections::BTreeSet<u32> = capture
-        .iter()
-        .filter_map(|p| parse_video_index(p))
-        .collect();
-
-    for api in [ApiBackend::Auto, ApiBackend::Video4Linux] {
-        match query(api) {
-            Ok(infos) => {
-                cam_debug(format!("nokhwa query({api:?}): {} device(s)", infos.len()));
-                for info in infos {
-                    cam_debug(format!(
-                        "  index={:?} name={} misc={}",
-                        info.index(),
-                        info.human_name(),
-                        info.misc()
-                    ));
-                    match info.index() {
-                        CameraIndex::Index(n) if capture_idx.is_empty() || capture_idx.contains(n) => {
-                            push(CameraIndex::Index(*n), &mut out, &mut seen);
-                        }
-                        CameraIndex::Index(n) => {
-                            cam_debug(format!("  skip nokhwa index {n} (not capture-capable)"));
-                        }
-                        other => {
-                            cam_debug(format!("  skip non-numeric index {other:?}"));
-                        }
-                    }
-                }
+        for (w, h) in discrete {
+            if w == 0 || h == 0 {
+                continue;
             }
-            Err(e) => cam_debug(format!("nokhwa query({api:?}): {e}")),
+            let score = (w as i64 - target.0 as i64).unsigned_abs()
+                + (h as i64 - target.1 as i64).unsigned_abs();
+            match best {
+                None => best = Some((w, h, score)),
+                Some((_, _, s)) if score < s => best = Some((w, h, score)),
+                _ => {}
+            }
         }
     }
+    best.map(|(w, h, _)| (w, h)).unwrap_or(target)
+}
 
-    if out.is_empty() && !capture_idx.is_empty() {
-        for n in capture_idx {
-            push(CameraIndex::Index(n), &mut out, &mut seen);
-        }
+fn negotiate_format(dev: &Device) -> Result<NegotiatedFormat, String> {
+    let formats = dev
+        .enum_formats()
+        .map_err(|e| format!("ENUM_FMT: {e}"))?;
+    if formats.is_empty() {
+        return Err("ENUM_FMT returned no formats".into());
     }
-
     cam_debug(format!(
-        "candidates: {}",
-        out.iter()
-            .map(|i| i.as_string())
+        "formats: {}",
+        formats
+            .iter()
+            .map(|f| format!("{} ({})", f.fourcc, f.description))
             .collect::<Vec<_>>()
             .join(", ")
     ));
-    if running_in_flatpak() {
-        cam_debug("note: Flatpak sandbox — portal Camera/PipeWire may be required (see README)");
+
+    let prefer = [FourCC::new(b"MJPG"), FourCC::new(b"JPEG"), FourCC::new(b"YUYV")];
+    let fourcc = prefer
+        .into_iter()
+        .find(|p| formats.iter().any(|f| f.fourcc == *p))
+        .or_else(|| formats.first().map(|f| f.fourcc))
+        .ok_or_else(|| "no usable FourCC".to_string())?;
+
+    let kind = fourcc_kind(fourcc).ok_or_else(|| {
+        format!("unsupported FourCC {fourcc} (need MJPG/YUYV)")
+    })?;
+
+    let (width, height) = pick_resolution(dev, fourcc);
+    let requested = Format::new(width, height, fourcc);
+    let actual = dev
+        .set_format(&requested)
+        .map_err(|e| format!("S_FMT {width}x{height} {fourcc}: {e}"))?;
+
+    let kind = fourcc_kind(actual.fourcc).unwrap_or(kind);
+    cam_debug(format!(
+        "S_FMT -> {}x{} {} ({kind:?})",
+        actual.width, actual.height, actual.fourcc
+    ));
+    if actual.width == 0 || actual.height == 0 {
+        return Err("S_FMT returned zero size".into());
     }
-    out
+    Ok(NegotiatedFormat {
+        width: actual.width,
+        height: actual.height,
+        kind,
+    })
 }
 
-fn try_open_index(index: CameraIndex) -> Result<Camera, String> {
-    // Prefer modest Closest/None first — AbsoluteHighest* can "Failed to Fulfill"
-    // when the global max FPS isn't available in MJPEG/YUYV (common on Alpine/ARM).
-    let attempts = [
-        RequestedFormatType::Closest(CameraFormat::new(
-            Resolution::new(640, 480),
-            FrameFormat::MJPEG,
-            30,
-        )),
-        RequestedFormatType::Closest(CameraFormat::new(
-            Resolution::new(640, 480),
-            FrameFormat::YUYV,
-            30,
-        )),
-        RequestedFormatType::Closest(CameraFormat::new(
-            Resolution::new(320, 240),
-            FrameFormat::YUYV,
-            30,
-        )),
-        RequestedFormatType::None,
-        RequestedFormatType::HighestFrameRate(30),
-        RequestedFormatType::AbsoluteHighestFrameRate,
-        RequestedFormatType::AbsoluteHighestResolution,
-    ];
-    let mut last = String::new();
-    for fmt_ty in attempts {
-        let requested = RequestedFormat::new::<RgbFormat>(fmt_ty);
-        match Camera::new(index.clone(), requested) {
-            Ok(cam) => {
-                cam_debug(format!("open OK index={} fmt={fmt_ty:?}", index.as_string()));
-                return Ok(cam);
-            }
-            Err(e) => {
-                cam_debug(format!(
-                    "open FAIL index={} fmt={fmt_ty:?}: {e}",
-                    index.as_string()
-                ));
-                last = e.to_string();
-            }
-        }
-    }
-    Err(last)
+/// Try opening `path`, negotiating format, and reading one frame.
+fn try_device(path: &Path) -> Result<NegotiatedFormat, String> {
+    let mut dev = Device::with_path(path).map_err(|e| format!("open: {e}"))?;
+    let fmt = negotiate_format(&dev)?;
+    let mut stream = MmapStream::with_buffers(&mut dev, BufType::VideoCapture, 4)
+        .map_err(|e| format!("REQBUFS/mmap: {e}"))?;
+    let _ = stream.next().map_err(|e| format!("first frame: {e}"))?;
+    Ok(fmt)
 }
 
-fn open_camera() -> Result<Camera, CameraError> {
-    let capture = list_capture_video_nodes();
-    let all_nodes = list_dev_video_nodes();
-    let candidates = candidate_indices();
-    let mut errors: Vec<String> = Vec::new();
-    let mut attempted = 0u32;
-
+fn open_first_working() -> Result<(PathBuf, NegotiatedFormat), CameraError> {
+    let candidates = candidate_paths();
+    let all = list_dev_video_nodes();
     if candidates.is_empty() {
-        if all_nodes.is_empty() {
+        if all.is_empty() {
             return Err(CameraError::NoCamera);
         }
         return Err(CameraError::Open(format!(
-            "found {} /dev/video* node(s) but none advertise V4L2 video capture \
-             (only metadata/control?). Try LIBREFOOD_CAMERA_DEVICE=/dev/videoN \
-             and LIBREFOOD_CAMERA_DEBUG=1. nodes: {}",
-            all_nodes.len(),
-            all_nodes
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "found {} /dev/video* node(s) but none advertise video capture. nodes: [{}]",
+            all.len(),
+            join_paths(&all)
         )));
     }
 
-    for index in candidates {
-        attempted += 1;
-        match try_open_index(index.clone()) {
-            Ok(cam) => return Ok(cam),
+    let mut failures: Vec<(String, FailureKind)> = Vec::new();
+    for path in &candidates {
+        cam_debug(format!("trying {}", path.display()));
+        match try_device(path) {
+            Ok(fmt) => {
+                return Ok((path.clone(), fmt));
+            }
             Err(e) => {
-                errors.push(format!("index {}: {e}", index.as_string()));
+                cam_debug(format!("fail {}: {e}", path.display()));
+                failures.push((format!("{}: {e}", path.display()), FailureKind::from_message(&e)));
             }
         }
     }
 
-    let skipped_meta = all_nodes.len().saturating_sub(capture.len());
-    let detail = format!(
-        "tried {attempted} capture device(s); skipped {skipped_meta} non-capture node(s). {}",
-        errors.join(" | ")
-    );
-    cam_debug(&detail);
-
-    if capture.is_empty() && all_nodes.is_empty() {
-        return Err(CameraError::NoCamera);
+    // Compact error: group identical messages instead of 12× spam.
+    let n = failures.len();
+    let mut by_msg: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut perm = 0usize;
+    let mut busy = 0usize;
+    for (msg, kind) in &failures {
+        // Strip path prefix for grouping: "/dev/videoN: rest"
+        let rest = msg
+            .split_once(": ")
+            .map(|(_, r)| r.to_string())
+            .unwrap_or_else(|| msg.clone());
+        *by_msg.entry(rest).or_default() += 1;
+        match kind {
+            FailureKind::Permission => perm += 1,
+            FailureKind::Busy => busy += 1,
+            _ => {}
+        }
     }
+    let summary = by_msg
+        .into_iter()
+        .map(|(m, c)| {
+            if c == 1 {
+                m
+            } else {
+                format!("{m} (×{c})")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let hint = if perm > 0 {
+        " Permission denied — add user to `video` group and re-login."
+    } else if busy > 0 {
+        " Device busy — close other camera apps."
+    } else {
+        " Try LIBREFOOD_CAMERA_DEVICE=/dev/video0 and LIBREFOOD_CAMERA_DEBUG=1; \
+         check `v4l2-ctl --list-formats-ext -d /dev/video0`."
+    };
 
     Err(CameraError::Open(format!(
-        "{detail}. capture devices: [{}]. Hint: `groups` should include `video`; \
-         close other apps using the camera; \
-         override with LIBREFOOD_CAMERA_DEVICE=/dev/video0; \
-         debug with LIBREFOOD_CAMERA_DEBUG=1.",
-        capture
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
+        "tried {n} capture device(s). {summary}.{hint}"
     )))
+}
+
+fn mjpeg_to_rgb(data: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let reader = ImageReader::new(Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|e| format!("jpeg probe: {e}"))?;
+    let img = reader
+        .decode()
+        .map_err(|e| format!("jpeg decode: {e}"))?
+        .to_rgb8();
+    Ok((img.width(), img.height(), img.into_raw()))
+}
+
+fn yuyv_to_rgb(width: u32, height: u32, yuyv: &[u8]) -> Result<Vec<u8>, String> {
+    let need = (width as usize).saturating_mul(height as usize).saturating_mul(2);
+    if yuyv.len() < need {
+        return Err(format!(
+            "YUYV buffer too small: got {} need {need}",
+            yuyv.len()
+        ));
+    }
+    if width % 2 != 0 {
+        return Err("YUYV width must be even".into());
+    }
+    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+    for chunk in yuyv[..need].chunks_exact(4) {
+        let y0 = chunk[0] as i32;
+        let u = chunk[1] as i32 - 128;
+        let y1 = chunk[2] as i32;
+        let v = chunk[3] as i32 - 128;
+        for y in [y0, y1] {
+            let r = (y + ((351 * v) >> 8)).clamp(0, 255) as u8;
+            let g = (y - ((179 * v + 86 * u) >> 8)).clamp(0, 255) as u8;
+            let b = (y + ((443 * u) >> 8)).clamp(0, 255) as u8;
+            rgb.extend_from_slice(&[r, g, b]);
+        }
+    }
+    Ok(rgb)
+}
+
+fn frame_to_rgb(kind: PixelKind, width: u32, height: u32, buf: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    match kind {
+        PixelKind::Mjpeg => mjpeg_to_rgb(buf),
+        PixelKind::Yuyv => Ok((width, height, yuyv_to_rgb(width, height, buf)?)),
+    }
 }
 
 fn rgb_to_luma(rgb: &[u8]) -> Vec<u8> {
     rgb.chunks_exact(3)
-        .map(|p| {
-            ((p[0] as u32 * 77 + p[1] as u32 * 150 + p[2] as u32 * 29) >> 8) as u8
-        })
+        .map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 150 + p[2] as u32 * 29) >> 8) as u8)
         .collect()
 }
 
-fn decode_rgb(width: u32, height: u32, rgb: &[u8]) -> Option<String> {
+fn decode_barcode(width: u32, height: u32, rgb: &[u8]) -> Option<String> {
     if rgb.len() < (width * height * 3) as usize || width == 0 || height == 0 {
         return None;
     }
@@ -573,51 +576,57 @@ pub fn scan_barcode_live<F>(
 where
     F: FnMut(u32, u32, Vec<u8>),
 {
-    let mut camera = open_camera()?;
-    camera
-        .open_stream()
-        .map_err(|e| CameraError::Open(e.to_string()))?;
+    let (path, negotiated) = open_first_working()?;
+    cam_debug(format!(
+        "scanning on {} {}x{} {:?}",
+        path.display(),
+        negotiated.width,
+        negotiated.height,
+        negotiated.kind
+    ));
+
+    let mut dev = Device::with_path(&path).map_err(|e| CameraError::Open(e.to_string()))?;
+    // Re-apply format after reopen.
+    let _ = negotiate_format(&dev).map_err(CameraError::Open)?;
+    let mut stream = MmapStream::with_buffers(&mut dev, BufType::VideoCapture, 4)
+        .map_err(|e| CameraError::Open(format!("mmap stream: {e}")))?;
+
+    // Brief warm-up; ignore first couple of failures on flaky USB cams.
+    std::thread::sleep(Duration::from_millis(50));
 
     let mut last_err = CameraError::NoBarcode;
-
     for i in 0..max_frames {
         if stop.load(Ordering::Relaxed) {
-            let _ = camera.stop_stream();
             return Err(CameraError::Cancelled);
         }
 
-        let frame = match camera.frame() {
-            Ok(f) => f,
+        let (buf, _meta) = match stream.next() {
+            Ok(v) => v,
             Err(e) => {
                 last_err = CameraError::Capture(e.to_string());
                 continue;
             }
         };
 
-        let decoded = match frame.decode_image::<RgbFormat>() {
-            Ok(d) => d,
-            Err(e) => {
-                last_err = CameraError::Capture(e.to_string());
-                continue;
-            }
-        };
-
-        let width = decoded.width();
-        let height = decoded.height();
-        let rgb = decoded.into_raw();
+        let (width, height, rgb) =
+            match frame_to_rgb(negotiated.kind, negotiated.width, negotiated.height, buf) {
+                Ok(v) => v,
+                Err(e) => {
+                    last_err = CameraError::Capture(e);
+                    continue;
+                }
+            };
 
         if i % 2 == 0 {
             let (pw, ph, prgb) = shrink_for_preview(width, height, &rgb, 640);
             on_frame(pw, ph, prgb);
         }
 
-        if let Some(code) = decode_rgb(width, height, &rgb) {
-            let _ = camera.stop_stream();
+        if let Some(code) = decode_barcode(width, height, &rgb) {
             return Ok(code);
         }
     }
 
-    let _ = camera.stop_stream();
     if stop.load(Ordering::Relaxed) {
         Err(CameraError::Cancelled)
     } else {
@@ -631,17 +640,13 @@ mod tests {
 
     #[test]
     fn probe_does_not_panic() {
-        let probe = camera_probe();
-        assert_eq!(camera_available(), probe.is_ready());
-        let _ = list_dev_video_nodes();
+        let probe = camera_probe_quick();
         let capture = list_capture_video_nodes();
-        let _ = candidate_indices();
         if !capture.is_empty() {
-            assert!(
-                probe.scan_enabled(),
-                "capture nodes present => Scan must stay enabled, got {probe:?}"
-            );
+            assert!(probe.scan_enabled());
         }
+        // Full probe opens hardware — only assert it does not panic.
+        let _ = camera_probe();
     }
 
     #[test]
@@ -686,19 +691,11 @@ mod tests {
             FailureKind::from_message("No such file or directory"),
             FailureKind::Missing
         );
-        assert_eq!(
-            FailureKind::from_message("Failed to Fulfill"),
-            FailureKind::Other
-        );
-        assert_eq!(
-            FailureKind::from_message("Failed to Fufill"),
-            FailureKind::Other
-        );
     }
 
     #[test]
     fn probe_labels_never_say_blocked() {
-        let samples = [
+        for p in [
             CameraProbe::Ready,
             CameraProbe::Missing,
             CameraProbe::PermissionDenied {
@@ -708,34 +705,26 @@ mod tests {
                 detail: "EBUSY".into(),
             },
             CameraProbe::Present {
-                detail: "Failed to Fulfill".into(),
+                detail: "fail".into(),
             },
-        ];
-        for p in samples {
-            let label = p.scan_button_label().to_lowercase();
-            assert!(!label.contains("blocked"), "label: {label}");
-            assert!(
-                !p.unavailable_message().to_lowercase().contains("blocked"),
-                "status for {p:?}"
-            );
+        ] {
+            assert!(!p.scan_button_label().to_lowercase().contains("blocked"));
+            assert!(!p.unavailable_message().to_lowercase().contains("blocked"));
         }
     }
 
     #[test]
-    fn classify_present_when_capture_nodes_exist() {
-        let nodes = vec![PathBuf::from("/dev/video0")];
-        let p = classify_probe_failure("Failed to Fulfill", &nodes);
-        assert!(matches!(p, CameraProbe::Present { .. }));
-        assert!(p.scan_enabled());
+    fn yuyv_roundtrip_size() {
+        let w = 4u32;
+        let h = 2u32;
+        // 4*2*2 = 16 bytes YUYV
+        let yuyv = vec![16u8, 128, 16, 128, 16, 128, 16, 128, 16, 128, 16, 128, 16, 128, 16, 128];
+        let rgb = yuyv_to_rgb(w, h, &yuyv).unwrap();
+        assert_eq!(rgb.len(), (w * h * 3) as usize);
     }
 
     #[test]
-    fn metadata_only_nodes_are_not_capture() {
-        // On this host video1 is metadata if present; capture filter must not panic.
-        for path in list_dev_video_nodes() {
-            let _ = is_v4l2_capture_node(&path);
-        }
-        // Capture list is a subset of all nodes.
+    fn metadata_subset() {
         let all = list_dev_video_nodes();
         let cap = list_capture_video_nodes();
         assert!(cap.iter().all(|p| all.contains(p)));

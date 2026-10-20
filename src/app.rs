@@ -459,21 +459,15 @@ fn handle_profiles_event(
         ProfilePageEvent::NewNamed(name) => {
             match model.store.create_new(&name) {
                 Ok(created) => {
+                    // Persist + model only here. List rebuild, dropdown sync, and
+                    // editor mount must not run in this update (GTK destroy races).
                     model.selected_profile_id = Some(created.id.clone());
                     model.rebuild_profile_lists();
-                    sync_profile_dropdown(widgets, model);
                     model.profiles_status =
                         format!("Created “{}” — opening editor.", created.name);
-                    if let Some(profile) = model.store.get(&created.id).cloned() {
-                        model.editing_profile = true;
-                        model.profile_editor = Some(ui_profiles::mount_profile_editor(
-                            &widgets.profiles_editor_body,
-                            &widgets.profiles_editor_footer,
-                            profile,
-                            &emit,
-                        ));
-                    }
+                    queue_msg(&sender, Msg::SyncProfileDropdown);
                     schedule_profiles_ui_refresh(&sender);
+                    queue_msg(&sender, Msg::Profiles(ProfilePageEvent::StartEdit));
                 }
                 Err(e) => model.profiles_status = e,
             }
@@ -532,8 +526,8 @@ fn handle_profiles_event(
                     let _ = model.store.set_active(&p.id);
                     model.selected_profile_id = Some(p.id.clone());
                     model.rebuild_profile_lists();
-                    sync_profile_dropdown(widgets, model);
                     model.profiles_status = format!("Duplicated as {}", p.id);
+                    queue_msg(&sender, Msg::SyncProfileDropdown);
                     schedule_profiles_ui_refresh(&sender);
                 }
                 Err(e) => model.profiles_status = e,
@@ -593,8 +587,8 @@ fn handle_profiles_event(
                 Ok(p) => {
                     model.selected_profile_id = Some(p.id.clone());
                     model.rebuild_profile_lists();
-                    sync_profile_dropdown(widgets, model);
                     model.profiles_status = format!("Imported {}", p.id);
+                    queue_msg(&sender, Msg::SyncProfileDropdown);
                     schedule_profiles_ui_refresh(&sender);
                 }
                 Err(e) => model.profiles_status = e,
@@ -610,8 +604,8 @@ fn handle_profiles_event(
                 Ok(()) => {
                     model.selected_profile_id = Some(model.store.active_id().to_string());
                     model.rebuild_profile_lists();
-                    sync_profile_dropdown(widgets, model);
                     model.profiles_status = "Removed user override / custom profile.".into();
+                    queue_msg(&sender, Msg::SyncProfileDropdown);
                     schedule_profiles_ui_refresh(&sender);
                 }
                 Err(e) => model.profiles_status = e,
@@ -640,7 +634,6 @@ fn handle_profiles_event(
                             let _ = model.store.set_active(&id);
                             model.selected_profile_id = Some(id.clone());
                             model.rebuild_profile_lists();
-                            sync_profile_dropdown(widgets, model);
                             model.editing_profile = false;
                             model.profile_editor = None;
                             ui_profiles::clear_editor(
@@ -648,6 +641,7 @@ fn handle_profiles_event(
                                 &widgets.profiles_editor_footer,
                             );
                             model.profiles_status = format!("Saved `{id}`.");
+                            queue_msg(&sender, Msg::SyncProfileDropdown);
                             schedule_profiles_ui_refresh(&sender);
                             if model.product.is_some() {
                                 queue_msg(&sender, Msg::Rescore);

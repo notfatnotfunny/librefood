@@ -540,10 +540,16 @@ pub fn ask_text_async(
         let done = Rc::clone(&done);
         let dialog = dialog.clone();
         Rc::new(move |value: Option<String>| {
-            if let Some(cb) = done.borrow_mut().take() {
-                cb(value);
-            }
+            // Take the callback before destroy — close_request may re-enter finish.
+            let cb = done.borrow_mut().take();
+            // Never run Relm4/GTK rebuilds from inside the OK/Cancel click stack
+            // (destroying this dialog or mounting the editor there freezes/crashes).
             dialog.destroy();
+            if let Some(cb) = cb {
+                gtk::glib::idle_add_local_once(move || {
+                    cb(value);
+                });
+            }
         })
     };
 

@@ -161,6 +161,75 @@ struct CamCandidate {
     pw_target: String,
     /// Value for `libcamerasrc camera-name` when known.
     libcamera_name: Option<String>,
+    /// Sensor mounting rotation in degrees (`api.libcamera.rotation`), if known.
+    sensor_rotation: Option<u32>,
+}
+
+/// Orientation hint for RGB uprighting (preview + barcode decode).
+#[derive(Debug, Clone, Copy)]
+pub struct OrientationHint {
+    /// Degrees CW from sensor metadata (`None` = unknown).
+    pub sensor_rotation: Option<u32>,
+    pub front: bool,
+}
+
+/// Look up orientation metadata for a camera id (serial / display / etc.).
+pub fn orientation_hint(id: &str) -> OrientationHint {
+    let cams = list_switchable_candidates();
+    if let Some(c) = find_candidate(&cams, id) {
+        return OrientationHint {
+            sensor_rotation: c.sensor_rotation,
+            front: c.facing == CameraFacing::Front,
+        };
+    }
+    OrientationHint {
+        sensor_rotation: None,
+        front: facing_from_text(id) == Some(CameraFacing::Front),
+    }
+}
+
+fn parse_rotation_prop(props: &gst::StructureRef) -> Option<u32> {
+    for key in [
+        "api.libcamera.rotation",
+        "api.libcamera.Rotation",
+        "video.orientation",
+        "image.orientation",
+        "orientation",
+    ] {
+        if let Some(s) = prop_as_string(props, key) {
+            let l = s.to_ascii_lowercase();
+            if let Some(n) = l
+                .trim_start_matches("rotate-")
+                .trim_start_matches("rot")
+                .trim_end_matches("deg")
+                .trim()
+                .parse::<u32>()
+                .ok()
+            {
+                return Some(n % 360);
+            }
+            if l.contains("90") {
+                return Some(90);
+            }
+            if l.contains("180") {
+                return Some(180);
+            }
+            if l.contains("270") {
+                return Some(270);
+            }
+        }
+        if let Ok(Some(v)) = props.get_optional::<i32>(key) {
+            if (0..360).contains(&v) {
+                return Some(v as u32);
+            }
+        }
+        if let Ok(Some(v)) = props.get_optional::<u32>(key) {
+            if v < 360 {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 fn facing_from_text(s: &str) -> Option<CameraFacing> {
@@ -260,13 +329,27 @@ fn friendly_label(facing: CameraFacing, id: &str, display: &str, max_area: u64) 
         return format!("{word} · {sensor}");
     }
     if max_area > 0 {
-        // Disambiguate two "Built-in Back Camera" entries by resolution.
         return format!("{word} · {}k", max_area / 1000);
     }
     if !display.is_empty() && facing_from_text(display).is_some() {
         return display.to_string();
     }
     word.to_string()
+}
+
+/// Snapshot-style short labels: Back / Wide / Front when area distinguishes rears.
+fn short_switch_label(facing: CameraFacing, max_area: u64, max_back_area: u64) -> Option<&'static str> {
+    match facing {
+        CameraFacing::Front => Some("Front"),
+        CameraFacing::Back | CameraFacing::External => {
+            if max_back_area > 0 && max_area > 0 && max_area < max_back_area {
+                Some("Wide")
+            } else {
+                Some("Back")
+            }
+        }
+        CameraFacing::Unknown => None,
+    }
 }
 
 fn config_dir() -> Option<std::path::PathBuf> {
@@ -344,7 +427,22 @@ pub fn list_cameras() -> Vec<CameraInfo> {
         return Vec::new();
     }
     let cams = list_switchable_candidates();
-    let mut out: Vec<CameraInfo> = cams.iter().map(CameraInfo::from_candidate).collect();
+    let max_back_area = cams
+        .iter()
+        .filter(|c| matches!(c.facing, CameraFacing::Back | CameraFacing::External))
+        .map(|c| c.max_area)
+        .max()
+        .unwrap_or(0);
+    let mut out: Vec<CameraInfo> = cams
+        .iter()
+        .map(|c| {
+            let mut info = CameraInfo::from_candidate(c);
+            if let Some(short) = short_switch_label(c.facing, c.max_area, max_back_area) {
+                info.label = short.to_string();
+            }
+            info
+        })
+        .collect();
     let pref = CameraFacingPref::Back;
     out.sort_by(|a, b| {
         let fa = cams
@@ -499,9 +597,12 @@ fn list_from_device_monitor() -> Vec<CamCandidate> {
             libcamera_id
         };
 
+        let sensor_rotation = props.as_ref().and_then(|p| parse_rotation_prop(p));
+
         cam_debug(format!(
             "gst device id={id:?} display={display:?} facing={} area={max_area} \
-             pw_target={pw_target:?} libcamera={libcamera_name:?} api={device_api:?} class={class}",
+             pw_target={pw_target:?} libcamera={libcamera_name:?} rotation={sensor_rotation:?} \
+             api={device_api:?} class={class}",
             facing.label()
         ));
         out.push(CamCandidate {
@@ -511,6 +612,7 @@ fn list_from_device_monitor() -> Vec<CamCandidate> {
             max_area,
             pw_target,
             libcamera_name,
+            sensor_rotation,
         });
     }
     monitor.stop();
@@ -566,6 +668,7 @@ fn list_from_cam_cli() -> Vec<CamCandidate> {
             display,
             facing,
             max_area: 0,
+            sensor_rotation: None,
         });
     }
     out_list
@@ -1289,6 +1392,7 @@ mod tests {
             max_area: 0,
             pw_target: "Qualcomm Camera Subsystem".into(),
             libcamera_name: None,
+            sensor_rotation: None,
         };
         let front = CamCandidate {
             id: "71".into(),
@@ -1297,6 +1401,7 @@ mod tests {
             max_area: 3145728,
             pw_target: "71".into(),
             libcamera_name: None,
+            sensor_rotation: Some(90),
         };
         let back = CamCandidate {
             id: "72".into(),
@@ -1305,7 +1410,11 @@ mod tests {
             max_area: 9216000,
             pw_target: "72".into(),
             libcamera_name: None,
+            sensor_rotation: Some(90),
         };
+        assert_eq!(short_switch_label(CameraFacing::Back, 9216000, 9216000), Some("Back"));
+        assert_eq!(short_switch_label(CameraFacing::Back, 4096000, 9216000), Some("Wide"));
+        assert_eq!(short_switch_label(CameraFacing::Front, 3145728, 9216000), Some("Front"));
         assert!(!is_switchable_camera(&junk));
         assert!(is_switchable_camera(&front));
         assert!(is_switchable_camera(&back));

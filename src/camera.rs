@@ -1109,6 +1109,158 @@ fn shrink_for_preview(width: u32, height: u32, rgb: &[u8], max_edge: u32) -> (u3
     (nw, nh, out)
 }
 
+/// `LIBREFOOD_CAMERA_ROTATE=0|90|180|270|auto` — degrees clockwise, or auto.
+fn env_rotate_degrees() -> Option<u16> {
+    let Ok(raw) = std::env::var("LIBREFOOD_CAMERA_ROTATE") else {
+        return None;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" => None,
+        "0" => Some(0),
+        "90" => Some(90),
+        "180" => Some(180),
+        "270" => Some(270),
+        other => {
+            cam_debug(format!("ignore invalid LIBREFOOD_CAMERA_ROTATE={other:?}"));
+            None
+        }
+    }
+}
+
+/// `LIBREFOOD_CAMERA_MIRROR=0|1|auto` — default auto (mirror front only).
+fn env_mirror(front: bool) -> bool {
+    match std::env::var("LIBREFOOD_CAMERA_MIRROR")
+        .unwrap_or_else(|_| "auto".into())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => front,
+    }
+}
+
+fn normalize_quarter_turns(deg: u32) -> u16 {
+    match deg % 360 {
+        0 => 0,
+        90 => 90,
+        180 => 180,
+        270 => 270,
+        // Snap odd values to nearest quarter (sensor quirks).
+        n if n < 45 || n >= 315 => 0,
+        n if n < 135 => 90,
+        n if n < 225 => 180,
+        _ => 270,
+    }
+}
+
+fn mirror_rgb_h(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; rgb.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let sx = width - 1 - x;
+            let si = ((y * width + sx) * 3) as usize;
+            let di = ((y * width + x) * 3) as usize;
+            out[di..di + 3].copy_from_slice(&rgb[si..si + 3]);
+        }
+    }
+    out
+}
+
+/// Rotate tightly packed RGB clockwise by 0/90/180/270.
+fn rotate_rgb_cw(width: u32, height: u32, rgb: &[u8], degrees: u16) -> (u32, u32, Vec<u8>) {
+    let need = (width as usize).saturating_mul(height as usize).saturating_mul(3);
+    if rgb.len() < need || width == 0 || height == 0 {
+        return (width, height, rgb.to_vec());
+    }
+    match degrees {
+        0 => (width, height, rgb[..need].to_vec()),
+        180 => {
+            let mut out = vec![0u8; need];
+            for y in 0..height {
+                for x in 0..width {
+                    let sx = width - 1 - x;
+                    let sy = height - 1 - y;
+                    let si = ((sy * width + sx) * 3) as usize;
+                    let di = ((y * width + x) * 3) as usize;
+                    out[di..di + 3].copy_from_slice(&rgb[si..si + 3]);
+                }
+            }
+            (width, height, out)
+        }
+        90 => {
+            // (x,y) → (h-1-y, x); new size h×w
+            let (nw, nh) = (height, width);
+            let mut out = vec![0u8; need];
+            for y in 0..height {
+                for x in 0..width {
+                    let nx = height - 1 - y;
+                    let ny = x;
+                    let si = ((y * width + x) * 3) as usize;
+                    let di = ((ny * nw + nx) * 3) as usize;
+                    out[di..di + 3].copy_from_slice(&rgb[si..si + 3]);
+                }
+            }
+            (nw, nh, out)
+        }
+        270 => {
+            // (x,y) → (y, w-1-x); new size h×w
+            let (nw, nh) = (height, width);
+            let mut out = vec![0u8; need];
+            for y in 0..height {
+                for x in 0..width {
+                    let nx = y;
+                    let ny = width - 1 - x;
+                    let si = ((y * width + x) * 3) as usize;
+                    let di = ((ny * nw + nx) * 3) as usize;
+                    out[di..di + 3].copy_from_slice(&rgb[si..si + 3]);
+                }
+            }
+            (nw, nh, out)
+        }
+        other => {
+            cam_debug(format!("rotate_rgb_cw: unsupported {other}, leaving unrotated"));
+            (width, height, rgb[..need].to_vec())
+        }
+    }
+}
+
+/// Upright RGB for preview + decode. Returns (w, h, rgb, logged_once_key).
+fn orient_rgb_frame(
+    width: u32,
+    height: u32,
+    rgb: Vec<u8>,
+    camera_id: Option<&str>,
+    phone_camss: bool,
+) -> (u32, u32, Vec<u8>, String) {
+    let hint = camera_id
+        .map(crate::gst_cam::orientation_hint)
+        .unwrap_or(crate::gst_cam::OrientationHint {
+            sensor_rotation: None,
+            front: false,
+        });
+
+    let (degrees, reason) = if let Some(d) = env_rotate_degrees() {
+        (d, "env")
+    } else if let Some(sr) = hint.sensor_rotation {
+        (normalize_quarter_turns(sr), "sensor")
+    } else if phone_camss && width > height {
+        // Landscape buffers on portrait phones (fajita) — Snapshot-style upright.
+        (90, "camss-landscape")
+    } else {
+        (0, "none")
+    };
+    let mirror = env_mirror(hint.front);
+
+    let (w, h, mut out) = rotate_rgb_cw(width, height, &rgb, degrees);
+    if mirror {
+        out = mirror_rgb_h(w, h, &out);
+    }
+    let key = format!("rot={degrees} mirror={mirror} reason={reason} id={camera_id:?}");
+    (w, h, out, key)
+}
+
 /// Shared knobs for a live scan (Snapshot-style camera flip).
 #[derive(Clone)]
 pub struct LiveScanControl {
@@ -1236,6 +1388,7 @@ where
 
     let mut cam = crate::gst_cam::GstCamera::open().map_err(CameraError::Open)?;
     let mut current_id = cam.camera_name().map(str::to_string);
+    let phone_camss = detect_camss_system();
     {
         let label = cam.camera_label();
         if let Ok(mut g) = control.label.lock() {
@@ -1250,6 +1403,7 @@ where
 
     let mut last_err = CameraError::NoBarcode;
     let mut clear_switching_on_frame = false;
+    let mut last_orient_log = String::new();
     for i in 0..max_frames {
         if control.stop.load(Ordering::Relaxed) {
             return Err(CameraError::Cancelled);
@@ -1267,17 +1421,34 @@ where
                 .unwrap_or(0);
             let next = &cameras[(pos + 1) % cameras.len()];
             cam_debug(format!(
-                "switch request old_id={:?} new_id={:?} label={:?} backend={}",
+                "switch request old_id={:?} new_id={:?} label={:?} backend={} cycle={}/{}",
                 old_id,
                 next.id,
                 next.label,
-                prefer.label()
+                prefer.label(),
+                pos + 1,
+                cameras.len()
             ));
 
             cam.shutdown();
-            std::thread::sleep(Duration::from_millis(300));
+            std::thread::sleep(Duration::from_millis(500));
 
-            match crate::gst_cam::GstCamera::open_for_switch(&next.id, prefer) {
+            let opened = match crate::gst_cam::GstCamera::open_for_switch(&next.id, prefer) {
+                Ok(c) => Ok(c),
+                Err(e) => {
+                    // Front often needs a longer settle after Wide/Back release.
+                    cam_debug(format!(
+                        "switch first try FAIL id={:?}: {e}; retrying",
+                        next.id
+                    ));
+                    std::thread::sleep(Duration::from_millis(450));
+                    crate::gst_cam::GstCamera::open_for_switch(&next.id, prefer).map_err(|e2| {
+                        format!("{e}; retry: {e2}")
+                    })
+                }
+            };
+
+            match opened {
                 Ok(new_cam) => {
                     cam_debug(format!(
                         "pipeline recreate OK old_id={:?} new_id={:?} via={}",
@@ -1294,6 +1465,7 @@ where
                     if let Ok(mut g) = control.label.lock() {
                         *g = label;
                     }
+                    last_orient_log.clear();
                     clear_switching_on_frame = true;
                 }
                 Err(e) => {
@@ -1332,6 +1504,17 @@ where
                     continue;
                 }
             };
+        let (width, height, rgb, orient_key) = orient_rgb_frame(
+            width,
+            height,
+            rgb,
+            current_id.as_deref(),
+            phone_camss,
+        );
+        if orient_key != last_orient_log {
+            cam_debug(format!("orientation {orient_key} frame={width}x{height}"));
+            last_orient_log = orient_key;
+        }
         if clear_switching_on_frame {
             control.switching.store(false, Ordering::SeqCst);
             clear_switching_on_frame = false;
@@ -1531,5 +1714,26 @@ mod tests {
         let all = list_dev_video_nodes();
         let cap = list_capture_video_nodes();
         assert!(cap.iter().all(|p| all.contains(p)));
+    }
+
+    #[test]
+    fn rotate_rgb_cw_swaps_dimensions() {
+        // 2×1: pixels [R,G] → 90° CW → 1×2 column [R,G]
+        let rgb = vec![1, 0, 0, 0, 1, 0];
+        let (w, h, out) = rotate_rgb_cw(2, 1, &rgb, 90);
+        assert_eq!((w, h), (1, 2));
+        assert_eq!(&out[0..3], &[1, 0, 0]);
+        assert_eq!(&out[3..6], &[0, 1, 0]);
+        let (w2, h2, back) = rotate_rgb_cw(w, h, &out, 270);
+        assert_eq!((w2, h2), (2, 1));
+        assert_eq!(back, rgb);
+    }
+
+    #[test]
+    fn normalize_quarter_turns_snaps() {
+        assert_eq!(normalize_quarter_turns(90), 90);
+        assert_eq!(normalize_quarter_turns(95), 90);
+        assert_eq!(normalize_quarter_turns(0), 0);
+        assert_eq!(normalize_quarter_turns(270), 270);
     }
 }

@@ -279,7 +279,8 @@ impl AppModel {
     }
 
     fn camera_ok(&self) -> bool {
-        self.camera_probe.is_ready()
+        // Enable Scan whenever a device may exist; only Missing grays the button.
+        self.camera_probe.scan_enabled()
     }
 
     fn is_lookup_page(&self) -> bool {
@@ -858,9 +859,11 @@ impl Component for AppModel {
         #[root]
         adw::ApplicationWindow {
             set_title: Some("Librefood"),
-            set_default_width: 520,
-            set_default_height: 780,
+            // Defaults overridden in init via monitor geometry / env.
+            set_default_width: 420,
+            set_default_height: 640,
             set_width_request: 360,
+            set_height_request: 320,
 
             #[wrap(Some)]
             set_content = &gtk::Box {
@@ -1598,14 +1601,7 @@ impl Component for AppModel {
         let widgets = view_output!();
         load_css();
         logo::apply_window_icon(&root);
-        if let (Ok(w), Ok(h)) = (
-            std::env::var("LIBREFOOD_WIDTH"),
-            std::env::var("LIBREFOOD_HEIGHT"),
-        ) {
-            if let (Ok(w), Ok(h)) = (w.parse::<i32>(), h.parse::<i32>()) {
-                root.set_default_size(w, h);
-            }
-        }
+        apply_adaptive_window_size(&root);
         rebuild_history_list(&widgets.history_list, model.history.entries(), &sender);
         rebuild_favorites_list(&widgets.favorites_list, model.favorites.entries(), &sender);
         refresh_profiles_page(&widgets, &model, &sender);
@@ -1961,6 +1957,8 @@ impl Component for AppModel {
             }
             Msg::ScanCamera => {
                 if !self.scanning {
+                    // Re-probe so a re-login / unplugged camera is reflected.
+                    self.camera_probe = camera::camera_probe();
                     if !self.camera_ok() {
                         self.status_kind = StatusKind::Error;
                         self.status_text = self.camera_probe.unavailable_message();
@@ -2116,7 +2114,20 @@ fn format_camera_err(e: CameraError) -> String {
     match e {
         CameraError::NoCamera => "No camera found. Type or paste a barcode instead.".into(),
         CameraError::Open(msg) => {
-            format!("Could not open camera ({msg}). Type a barcode instead.")
+            let lower = msg.to_lowercase();
+            if lower.contains("permission")
+                || lower.contains("denied")
+                || lower.contains("eacces")
+            {
+                format!(
+                    "Camera permission denied ({msg}). On Alpine: \
+                     `sudo adduser $USER video`, then re-login. Or type a barcode."
+                )
+            } else if lower.contains("busy") || lower.contains("ebusy") {
+                format!("Camera busy ({msg}). Close other apps using it, or type a barcode.")
+            } else {
+                format!("Could not open camera ({msg}). Type a barcode instead.")
+            }
         }
         CameraError::Capture(msg) => {
             format!("Camera capture failed ({msg}). Try again or type a barcode.")
@@ -2126,6 +2137,60 @@ fn format_camera_err(e: CameraError) -> String {
                 .into()
         }
         CameraError::Cancelled => "Scan cancelled.".into(),
+    }
+}
+
+/// Size the window from the primary monitor's geometry so phone/tablet Alpine
+/// ARM displays are not stuck with a tall desktop default that overflows.
+///
+/// Override with `LIBREFOOD_WIDTH` + `LIBREFOOD_HEIGHT` (also used for tests).
+fn apply_adaptive_window_size(win: &adw::ApplicationWindow) {
+    if let (Ok(w), Ok(h)) = (
+        std::env::var("LIBREFOOD_WIDTH"),
+        std::env::var("LIBREFOOD_HEIGHT"),
+    ) {
+        if let (Ok(w), Ok(h)) = (w.parse::<i32>(), h.parse::<i32>()) {
+            win.set_default_size(w.max(360), h.max(320));
+            return;
+        }
+    }
+
+    let Some(display) = gdk::Display::default() else {
+        win.set_default_size(420, 640);
+        return;
+    };
+
+    let monitors = display.monitors();
+    let monitor = monitors
+        .item(0)
+        .and_then(|o| o.downcast::<gdk::Monitor>().ok());
+
+    let Some(monitor) = monitor else {
+        win.set_default_size(420, 640);
+        return;
+    };
+
+    let geom = monitor.geometry();
+    // Leave room for panels / chrome.
+    let usable_w = (geom.width() - 48).max(360);
+    let usable_h = (geom.height() - 64).max(320);
+
+    let phone_like = usable_w <= 600 || usable_h <= 520;
+    let small = phone_like || usable_w <= 900 || usable_h <= 700;
+
+    if phone_like {
+        // Fill the usable area and maximize — portrait defaults fight landscape phones.
+        win.set_default_size(usable_w, usable_h);
+        win.maximize();
+    } else if small {
+        // Nearly full usable area without forcing maximize on larger tablets.
+        let w = usable_w.min(720).max(360);
+        let h = usable_h.max(320);
+        win.set_default_size(w, h);
+    } else {
+        let w = 520.min(usable_w).max(360);
+        let h = 780.min(usable_h).max(400);
+        win.set_default_size(w, h);
     }
 }
 

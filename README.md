@@ -93,11 +93,11 @@ sudo pacman -S libcamera gst-plugin-libcamera pipewire
 | `LIBREFOOD_CAMERA_ROTATE=auto` | Upright preview/decode: `auto` (default), or `0` / `90` / `180` / `270` (CW) |
 | `LIBREFOOD_CAMERA_MIRROR=auto` | Mirror after rotate: `auto` (front only), `1`, or `0` |
 
-On fajita (multiple cams), default is **back** (largest back area). Preview RGB is uprighted for portrait phones (sensor/`api.libcamera.rotation` when present, else 90° CW on CAMSS landscape frames) before GTK Picture **and** barcode decode. **Switch camera** cycles **Back → Wide → Front → …** (CAMSS V4L junk filtered). Last choice: `~/.config/librefood/camera-id`.
+On fajita (multiple cams), default is **back** (largest back area). Preview RGB is uprighted for portrait phones (sensor/`api.libcamera.rotation` when present, else **270° CW** / 90° CCW on CAMSS landscape frames) before GTK Picture **and** barcode decode. **Switch camera** cycles **Back → Wide → Front → …** (CAMSS V4L junk filtered). Last choice: `~/.config/librefood/camera-id`.
 
 ```bash
 LIBREFOOD_CAMERA_DEBUG=1 ./target/release/librefood
-# if preview is still sideways: LIBREFOOD_CAMERA_ROTATE=270
+# if preview is still wrong: LIBREFOOD_CAMERA_ROTATE=90  # or 0 / 180 / 270
 # or: LIBREFOOD_CAMERA_NAME='<object.serial from gst-device-monitor>'
 ```
 

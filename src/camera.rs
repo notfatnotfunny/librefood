@@ -1246,8 +1246,9 @@ fn orient_rgb_frame(
     } else if let Some(sr) = hint.sensor_rotation {
         (normalize_quarter_turns(sr), "sensor")
     } else if phone_camss && width > height {
-        // Landscape buffers on portrait phones (fajita) — Snapshot-style upright.
-        (90, "camss-landscape")
+        // Landscape buffers on portrait phones (fajita): 90° CW left the image
+        // upside-down; 270° CW (= 90° CCW) matches the sensor mount.
+        (270, "camss-landscape")
     } else {
         (0, "none")
     };

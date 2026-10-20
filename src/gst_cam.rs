@@ -16,9 +16,10 @@ use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use gst_video::VideoFrameExt;
 use std::process::Command;
-use std::sync::Once;
+use std::sync::OnceLock;
 
-static GST_INIT: Once = Once::new();
+/// Cached `gst::init` result — never panic on the UI thread if init fails.
+static GST_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 fn cam_debug(msg: impl AsRef<str>) {
     if matches!(
@@ -29,20 +30,17 @@ fn cam_debug(msg: impl AsRef<str>) {
     }
 }
 
+/// Idempotent GStreamer init. Must run before DeviceMonitor / ElementFactory / pipelines.
 fn ensure_gst() -> Result<(), String> {
-    let mut err = None;
-    GST_INIT.call_once(|| {
-        if let Err(e) = gst::init() {
-            err = Some(e.to_string());
-        }
-    });
-    match err {
-        Some(e) => Err(format!("gstreamer init: {e}")),
-        None => Ok(()),
-    }
+    GST_INIT
+        .get_or_init(|| gst::init().map_err(|e| format!("gstreamer init: {e}")))
+        .clone()
 }
 
 fn element_available(name: &str) -> bool {
+    if ensure_gst().is_err() {
+        return false;
+    }
     gst::ElementFactory::find(name).is_some()
 }
 
@@ -425,6 +423,10 @@ fn candidate_sources() -> Vec<GstSource> {
 }
 
 fn list_from_device_monitor() -> Vec<CamCandidate> {
+    if ensure_gst().is_err() {
+        cam_debug("list_from_device_monitor: gst init failed");
+        return Vec::new();
+    }
     let monitor = gst::DeviceMonitor::new();
     let _ = monitor.add_filter(Some("Source/Video"), None);
     let _ = monitor.add_filter(Some("Video/Source"), None);
@@ -630,6 +632,11 @@ pub fn resolve_libcamera_name() -> Option<String> {
 }
 
 pub fn resolve_camera_id() -> Option<String> {
+    if let Err(e) = ensure_gst() {
+        cam_debug(format!("resolve_camera_id: {e}"));
+        return None;
+    }
+
     if let Ok(name) = std::env::var("LIBREFOOD_CAMERA_NAME") {
         let name = name.trim().to_string();
         if !name.is_empty() {
@@ -717,6 +724,9 @@ pub fn resolve_camera_id() -> Option<String> {
 }
 
 fn find_monitor_device(id: &str) -> Option<gst::Device> {
+    if ensure_gst().is_err() {
+        return None;
+    }
     let monitor = gst::DeviceMonitor::new();
     let _ = monitor.add_filter(Some("Source/Video"), None);
     let _ = monitor.add_filter(Some("Video/Source"), None);
@@ -897,6 +907,8 @@ pub struct GstCamera {
 
 impl GstCamera {
     pub fn open() -> Result<Self, String> {
+        // Must init before resolve_camera_id → DeviceMonitor (fajita Scan crash).
+        ensure_gst()?;
         // Prefer an explicit Back (etc.) target — untargeted pipewire often picks Front.
         if let Some(id) = resolve_camera_id() {
             match Self::open_camera_id(&id) {
@@ -1297,5 +1309,17 @@ mod tests {
         assert!(!is_switchable_camera(&junk));
         assert!(is_switchable_camera(&front));
         assert!(is_switchable_camera(&back));
+    }
+
+    /// Regression: DeviceMonitor enumeration must not run before gst::init
+    /// (fajita panic: "GStreamer has not been initialized").
+    #[test]
+    fn list_and_resolve_init_gst_first() {
+        // Must not panic even when this is the first GST touch in the process.
+        let _ = list_cameras();
+        let _ = resolve_camera_id();
+        let _ = gst_camera_available();
+        let _ = candidate_sources();
+        assert!(ensure_gst().is_ok() || ensure_gst().is_err());
     }
 }

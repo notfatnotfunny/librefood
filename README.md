@@ -1,10 +1,11 @@
 # Librefood
 
-Native Linux desktop app (Rust + GTK4 / Relm4 / libadwaita) that looks up a product’s **Nutri-Score** from the public [Open Food Facts](https://world.openfoodfacts.org/) API.
+Native Linux desktop app (Rust + GTK4 / Relm4 / libadwaita) that looks up products from the public [Open Food Facts](https://world.openfoodfacts.org/) API and scores them with **transparent, user-editable scoring profiles**.
 
-Scan a barcode with a webcam (live preview + centering guide), or type/paste an EAN-13 (etc.) code when no camera is available.
+Scan a barcode with a webcam, type/paste an EAN, or search by name. OFF source data stays separate from derived scores. Custom scores are **not** official Nutri-Score and **not** medical advice.
 
-**App ID:** `org.librefood.Librefood`
+**App ID:** `org.librefood.Librefood`  
+**Scoring docs:** [`docs/scoring-engine.md`](docs/scoring-engine.md)
 
 ## Quick install (build from source)
 
@@ -45,15 +46,18 @@ Window minimum width is ~360px; the input row stacks vertically on narrow widths
 
 ## Usage
 
-1. **Type or paste** a barcode (digits only; spaces are stripped) and press **Look up** or Enter.
-2. Or click **Scan with camera** — live preview opens with a dashed centering guide; **Cancel scan** stops capture.
-3. Results show product name, brands/quantity when present, and a Nutri-Score badge **A–E**.
+1. **Type or paste** a barcode (digits only; spaces are stripped) and press **Look up**, or **Search** by product name.
+2. Or click **Scan with camera** — live preview with a centering guide; **Cancel scan** stops capture.
+3. Pick a **scoring profile** in the dropdown (or **Manage profiles…** to duplicate/edit/import/export JSON).
+4. Results show image, Librefood score, Negatives/Positives, and **calculation steps**. **Compare** scores the same product under every profile.
+5. Profiles live in `~/.config/librefood/profiles/`. Built-in examples: nutritional quality, minimally processed, additive-conscious, environmental impact, blank.
 
 ### Example barcodes
 
 | Barcode         | Notes                          |
 |-----------------|--------------------------------|
 | `3017620422003` | Nutella (classic test product) |
+| `5449000000996` | Coca-Cola                      |
 | `0000000000000` | Expected not-found             |
 
 ## Flatpak

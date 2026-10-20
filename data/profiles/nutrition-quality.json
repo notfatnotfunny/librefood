@@ -1,0 +1,109 @@
+{
+  "id": "nutrition-quality",
+  "name": "General nutritional quality",
+  "description": "Example profile balancing energy, sugars, saturated fat, salt, fiber, and protein. Configurable evaluation system — not a medical judgment.",
+  "version": 1,
+  "builtin": true,
+  "scale": { "kind": "numeric", "min": 0, "max": 100 },
+  "base_score": 55,
+  "missing_data": "ignore",
+  "default_missing_penalty": -4,
+  "labels": [
+    { "min": 75, "label": "Excellent", "tone": "good" },
+    { "min": 55, "label": "Good", "tone": "good" },
+    { "min": 30, "label": "Mediocre", "tone": "mediocre" },
+    { "min": 0, "label": "Poor", "tone": "poor" }
+  ],
+  "criteria": [
+    {
+      "id": "energy",
+      "title": "Energy",
+      "attribute": "energy_kcal_100g",
+      "weight": 1.0,
+      "polarity": "negative",
+      "rules": [
+        { "when": { "op": "lte", "value": 150 }, "adjust": 4, "label": "Low calorie density", "tone": "good" },
+        { "when": { "op": "lte", "value": 400 }, "adjust": -6, "label": "A bit too caloric", "tone": "mediocre" },
+        { "when": { "op": "gt", "value": 400 }, "adjust": -12, "label": "Too caloric", "tone": "poor" }
+      ]
+    },
+    {
+      "id": "sugars",
+      "title": "Sugars",
+      "attribute": "sugars_100g",
+      "weight": 1.0,
+      "polarity": "negative",
+      "rules": [
+        { "when": { "op": "lte", "value": 5 }, "adjust": 4, "label": "Low sugar", "tone": "good" },
+        { "when": { "op": "lte", "value": 22.5 }, "adjust": -6, "label": "A bit too sugary", "tone": "mediocre" },
+        { "when": { "op": "gt", "value": 22.5 }, "adjust": -12, "label": "High sugar", "tone": "poor" }
+      ]
+    },
+    {
+      "id": "saturated_fat",
+      "title": "Saturated fats",
+      "attribute": "saturated_fat_100g",
+      "weight": 1.0,
+      "polarity": "negative",
+      "rules": [
+        { "when": { "op": "lte", "value": 1.5 }, "adjust": 3, "label": "Low saturated fat", "tone": "good" },
+        { "when": { "op": "lte", "value": 5 }, "adjust": -5, "label": "A bit too fatty", "tone": "mediocre" },
+        { "when": { "op": "gt", "value": 5 }, "adjust": -10, "label": "High saturated fat", "tone": "poor" }
+      ]
+    },
+    {
+      "id": "salt",
+      "title": "Salt",
+      "attribute": "salt_100g",
+      "weight": 1.0,
+      "polarity": "negative",
+      "rules": [
+        { "when": { "op": "lte", "value": 0.3 }, "adjust": 3, "label": "Low salt", "tone": "good" },
+        { "when": { "op": "lte", "value": 1.5 }, "adjust": -4, "label": "A bit salty", "tone": "mediocre" },
+        { "when": { "op": "gt", "value": 1.5 }, "adjust": -9, "label": "High salt", "tone": "poor" }
+      ]
+    },
+    {
+      "id": "fiber",
+      "title": "Fiber",
+      "attribute": "fiber_100g",
+      "weight": 1.0,
+      "polarity": "positive",
+      "rules": [
+        { "when": { "op": "gte", "value": 6 }, "adjust": 8, "label": "Excellent amount of fiber", "tone": "good" },
+        { "when": { "op": "gte", "value": 3 }, "adjust": 5, "label": "Good amount of fiber", "tone": "good" },
+        { "when": { "op": "gte", "value": 1.5 }, "adjust": 2, "label": "Some fiber", "tone": "mediocre" },
+        { "when": { "op": "lt", "value": 1.5 }, "adjust": -4, "label": "Low fiber", "tone": "poor" }
+      ]
+    },
+    {
+      "id": "proteins",
+      "title": "Proteins",
+      "attribute": "proteins_100g",
+      "weight": 1.0,
+      "polarity": "positive",
+      "rules": [
+        { "when": { "op": "gte", "value": 10 }, "adjust": 8, "label": "Excellent amount of protein", "tone": "good" },
+        { "when": { "op": "gte", "value": 5 }, "adjust": 4, "label": "Some protein", "tone": "good" },
+        { "when": { "op": "gte", "value": 2.5 }, "adjust": 1, "label": "Low protein", "tone": "mediocre" },
+        { "when": { "op": "lt", "value": 2.5 }, "adjust": -3, "label": "Very little protein", "tone": "poor" }
+      ]
+    },
+    {
+      "id": "nutriscore",
+      "title": "Nutri-Score (OFF)",
+      "attribute": "nutriscore_ordinal",
+      "weight": 0.5,
+      "polarity": "neutral",
+      "rules": [
+        { "when": { "op": "eq", "value": 5 }, "adjust": 10, "label": "OFF Nutri-Score A", "tone": "good" },
+        { "when": { "op": "eq", "value": 4 }, "adjust": 5, "label": "OFF Nutri-Score B", "tone": "good" },
+        { "when": { "op": "eq", "value": 3 }, "adjust": 0, "label": "OFF Nutri-Score C", "tone": "mediocre" },
+        { "when": { "op": "eq", "value": 2 }, "adjust": -5, "label": "OFF Nutri-Score D", "tone": "mediocre" },
+        { "when": { "op": "eq", "value": 1 }, "adjust": -10, "label": "OFF Nutri-Score E", "tone": "poor" }
+      ]
+    }
+  ],
+  "caps": [],
+  "category_overrides": []
+}

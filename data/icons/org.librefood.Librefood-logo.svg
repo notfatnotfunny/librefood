@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Healthy Food Logo</title>
+  <desc>A fresh green bowl filled with colorful vegetables and framed by a leafy green circle.</desc>
+  <rect width="512" height="512" rx="28" fill="#ffffff"/>
+  <g fill="none" stroke="#4a9f24" stroke-width="10" stroke-linecap="round">
+    <path d="M82 218 C101 134 163 85 226 69"/>
+    <path d="M286 69 C351 86 411 136 430 218"/>
+    <path d="M83 218 C69 292 92 354 137 397"/>
+    <path d="M429 218 C443 292 420 354 375 397"/>
+  </g>
+  <g fill="#4a9f24">
+    <path d="M237 75 C230 43 247 20 275 16 C278 43 264 63 237 75Z"/>
+    <path d="M235 75 C204 70 190 49 194 26 C219 31 234 48 235 75Z"/>
+  </g>
+  <!-- leafy greens -->
+  <g fill="#22833b">
+    <path d="M179 321 C139 306 116 273 125 238 C130 220 144 210 159 215 C154 190 169 169 190 177 C204 183 211 200 207 216 C229 206 249 219 249 240 C249 267 220 301 179 321Z"/>
+    <path d="M188 309 C180 270 174 232 158 211" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+    <path d="M183 276 L147 250 M194 293 L226 254 M175 247 L199 225" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+  </g>
+  <!-- carrot -->
+  <path d="M287 190 C306 165 342 170 352 194 C360 213 347 230 334 245 L298 292 L269 267 L284 225Z" fill="#ff8615"/>
+  <path d="M301 211 L324 219 M291 235 L310 244" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+  <g fill="#27843a">
+    <path d="M321 181 C313 159 321 143 336 137 C342 155 336 171 321 181Z"/>
+    <path d="M331 181 C337 157 354 148 368 155 C360 173 347 181 331 181Z"/>
+  </g>
+  <!-- yellow pepper -->
+  <path d="M341 252 C360 233 389 239 397 261 C405 284 388 309 370 324 L335 328 C326 302 326 271 341 252Z" fill="#ffbf19"/>
+  <path d="M355 247 C357 232 370 225 383 231" fill="none" stroke="#27843a" stroke-width="9" stroke-linecap="round"/>
+  <!-- tomato -->
+  <path d="M187 278 C192 247 220 237 243 248 C265 241 288 258 290 282 C292 303 276 317 256 321 L198 321 C181 313 179 295 187 278Z" fill="#ed3429"/>
+  <path d="M232 253 L237 269 L253 262 L245 278 L261 285 L241 286 L236 301 L229 285 L212 291 L222 277 L211 266 L229 270Z" fill="#27843a"/>
+  <path d="M208 278 C213 268 222 264 229 265" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+  <!-- bowl -->
+  <path d="M113 327 Q256 349 399 327 C389 390 341 431 256 433 C171 431 123 390 113 327Z" fill="#176b3a"/>
+  <path d="M143 350 C157 381 180 401 207 411" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+  <path d="M216 443 Q256 450 296 443" fill="none" stroke="#176b3a" stroke-width="10" stroke-linecap="round"/>
+</svg>

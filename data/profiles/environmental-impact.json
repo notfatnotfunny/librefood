@@ -1,0 +1,59 @@
+{
+  "id": "environmental-impact",
+  "name": "Environmental impact",
+  "description": "Uses Open Food Facts Eco-Score when available, plus organic and NOVA as weak signals. Example profile — Eco-Score is OFF data, not a Librefood invention.",
+  "version": 1,
+  "builtin": true,
+  "scale": { "kind": "numeric", "min": 0, "max": 100 },
+  "base_score": 50,
+  "missing_data": "unknown",
+  "default_missing_penalty": -5,
+  "labels": [
+    { "min": 75, "label": "Excellent", "tone": "good" },
+    { "min": 55, "label": "Good", "tone": "good" },
+    { "min": 30, "label": "Mediocre", "tone": "mediocre" },
+    { "min": 0, "label": "Poor", "tone": "poor" }
+  ],
+  "criteria": [
+    {
+      "id": "ecoscore",
+      "title": "Eco-Score (OFF)",
+      "attribute": "ecoscore_score",
+      "weight": 1.0,
+      "polarity": "positive",
+      "missing_policy": "unknown",
+      "rules": [
+        { "when": { "op": "gte", "value": 80 }, "adjust": 25, "label": "Strong Eco-Score", "tone": "good" },
+        { "when": { "op": "gte", "value": 60 }, "adjust": 12, "label": "Good Eco-Score", "tone": "good" },
+        { "when": { "op": "gte", "value": 40 }, "adjust": 0, "label": "Moderate Eco-Score", "tone": "mediocre" },
+        { "when": { "op": "gte", "value": 20 }, "adjust": -12, "label": "Low Eco-Score", "tone": "mediocre" },
+        { "when": { "op": "lt", "value": 20 }, "adjust": -25, "label": "Very low Eco-Score", "tone": "poor" }
+      ]
+    },
+    {
+      "id": "organic",
+      "title": "Organic label",
+      "attribute": "organic",
+      "weight": 0.8,
+      "polarity": "positive",
+      "rules": [
+        { "when": { "op": "eq", "value": 1 }, "adjust": 10, "label": "Organic label", "tone": "good" },
+        { "when": { "op": "eq", "value": 0 }, "adjust": -2, "label": "No organic label", "tone": "neutral" }
+      ]
+    },
+    {
+      "id": "nova",
+      "title": "NOVA group",
+      "attribute": "nova_group",
+      "weight": 0.6,
+      "polarity": "negative",
+      "rules": [
+        { "when": { "op": "lte", "value": 2 }, "adjust": 6, "label": "Lower processing", "tone": "good" },
+        { "when": { "op": "eq", "value": 3 }, "adjust": -3, "label": "Processed", "tone": "mediocre" },
+        { "when": { "op": "eq", "value": 4 }, "adjust": -10, "label": "Ultra-processed", "tone": "poor" }
+      ]
+    }
+  ],
+  "caps": [],
+  "category_overrides": []
+}

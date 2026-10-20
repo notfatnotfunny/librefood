@@ -1,7 +1,12 @@
 mod app;
 mod camera;
+mod engine;
+mod logo;
 mod off;
+mod product;
+mod profiles;
 mod score;
+mod ui_profiles;
 
 use app::AppModel;
 use relm4::prelude::*;
@@ -22,7 +27,6 @@ fn main() {
     }
 
     adw::init().expect("Failed to initialize libadwaita");
-    // Pass stripped argv so GApplication does not reject --barcode.
     let app = RelmApp::new("org.librefood.Librefood").with_args(argv);
     app.run::<AppModel>(initial_barcode);
 }

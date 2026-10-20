@@ -46,4 +46,11 @@ modules:
       - install -Dm644 data/org.librefood.Librefood.desktop /app/share/applications/org.librefood.Librefood.desktop
       - install -Dm644 data/org.librefood.Librefood.metainfo.xml /app/share/metainfo/org.librefood.Librefood.metainfo.xml
       - install -Dm644 data/icons/hicolor/scalable/apps/org.librefood.Librefood.svg /app/share/icons/hicolor/scalable/apps/org.librefood.Librefood.svg
+      - install -Dm644 data/icons/hicolor/64x64/apps/org.librefood.Librefood.png /app/share/icons/hicolor/64x64/apps/org.librefood.Librefood.png
       - install -Dm644 data/icons/hicolor/128x128/apps/org.librefood.Librefood.png /app/share/icons/hicolor/128x128/apps/org.librefood.Librefood.png
+      - install -Dm644 data/icons/hicolor/256x256/apps/org.librefood.Librefood.png /app/share/icons/hicolor/256x256/apps/org.librefood.Librefood.png
+      - install -Dm644 data/profiles/nutrition-quality.json /app/share/librefood/profiles/nutrition-quality.json
+      - install -Dm644 data/profiles/minimally-processed.json /app/share/librefood/profiles/minimally-processed.json
+      - install -Dm644 data/profiles/additive-conscious.json /app/share/librefood/profiles/additive-conscious.json
+      - install -Dm644 data/profiles/environmental-impact.json /app/share/librefood/profiles/environmental-impact.json
+      - install -Dm644 data/profiles/blank.json /app/share/librefood/profiles/blank.json

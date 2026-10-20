@@ -38,7 +38,6 @@ pub enum Msg {
     SwitchCamera,
     WidthChanged(i32),
     ProfileSelected(u32),
-    OpenProfilesPage,
     Profiles(ui_profiles::ProfilePageEvent),
     /// Rebuild Profiles list/actions after the current update returns (avoids GTK freezes).
     RefreshProfilesUi,
@@ -55,6 +54,10 @@ pub enum Msg {
     Rescore,
     CompareProfiles,
     ShowPage(AppPage),
+    /// Open a Search-tab sub-page (hub / camera / text / ean / product).
+    OpenSearchPane(SearchPane),
+    /// Pop Search navigation one step toward the hub.
+    SearchBack,
     ToggleFavorite,
     OpenLibraryBarcode(String),
     ClearHistory,
@@ -68,6 +71,16 @@ pub enum AppPage {
     History,
     Favorites,
     Profiles,
+}
+
+/// Sub-pages inside the Search (Lookup) bottom-nav tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchPane {
+    Hub,
+    Camera,
+    Text,
+    Ean,
+    Product,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +140,10 @@ pub struct AppModel {
     active_profile_index: u32,
     search_hits: Vec<off::SearchHit>,
     page: AppPage,
+    /// Navigation inside the Search tab (hub → mode → product).
+    search_pane: SearchPane,
+    /// Pane to return to when leaving the product page (mode or hub).
+    search_return: SearchPane,
     history: HistoryStore,
     favorites: FavoritesStore,
     selected_profile_id: Option<String>,
@@ -292,10 +309,6 @@ impl AppModel {
         }
     }
 
-    fn scan_label(&self) -> &'static str {
-        self.camera_probe.scan_button_label()
-    }
-
     fn camera_ok(&self) -> bool {
         // Enable Scan whenever a device may exist; only Missing grays the button.
         self.camera_probe.scan_enabled()
@@ -303,6 +316,47 @@ impl AppModel {
 
     fn is_lookup_page(&self) -> bool {
         self.page == AppPage::Lookup
+    }
+
+    fn is_search_hub(&self) -> bool {
+        self.page == AppPage::Lookup && self.search_pane == SearchPane::Hub
+    }
+
+    fn is_search_camera(&self) -> bool {
+        self.page == AppPage::Lookup && self.search_pane == SearchPane::Camera
+    }
+
+    fn is_search_text(&self) -> bool {
+        self.page == AppPage::Lookup && self.search_pane == SearchPane::Text
+    }
+
+    fn is_search_ean(&self) -> bool {
+        self.page == AppPage::Lookup && self.search_pane == SearchPane::Ean
+    }
+
+    fn is_search_product(&self) -> bool {
+        self.page == AppPage::Lookup && self.search_pane == SearchPane::Product
+    }
+
+    fn header_title(&self) -> &'static str {
+        match self.page {
+            AppPage::Lookup => match self.search_pane {
+                SearchPane::Hub => "Librefood",
+                SearchPane::Camera => "Camera",
+                SearchPane::Text => "Search",
+                SearchPane::Ean => "Barcode",
+                SearchPane::Product => "Product",
+            },
+            AppPage::History => "History",
+            AppPage::Favorites => "Favorites",
+            AppPage::Profiles => {
+                if self.editing_profile {
+                    "Edit profile"
+                } else {
+                    "Profiles"
+                }
+            }
+        }
     }
 
     fn is_history_page(&self) -> bool {
@@ -951,7 +1005,19 @@ impl Component for AppModel {
                 add_top_bar = &adw::HeaderBar {
                     #[wrap(Some)]
                     set_title_widget = &adw::WindowTitle {
-                        set_title: "Librefood",
+                        #[watch]
+                        set_title: model.header_title(),
+                    },
+
+                    pack_start = &gtk::Button {
+                        set_icon_name: "go-previous-symbolic",
+                        set_tooltip_text: Some("Back"),
+                        #[watch]
+                        set_visible: model.page == AppPage::Lookup
+                            && model.search_pane != SearchPane::Hub,
+                        connect_clicked[sender] => move |_| {
+                            sender.input(Msg::SearchBack);
+                        },
                     },
                 },
 
@@ -959,194 +1025,138 @@ impl Component for AppModel {
                 set_content = &gtk::Box {
                     set_orientation: gtk::Orientation::Vertical,
 
-                // —— Lookup page ——
-                gtk::ScrolledWindow {
+                // —— Search tab: hub → mode → product ——
+                gtk::Box {
+                    set_orientation: gtk::Orientation::Vertical,
                     set_vexpand: true,
                     set_hexpand: true,
-                    set_propagate_natural_height: false,
-                    set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
                     #[watch]
                     set_visible: model.is_lookup_page(),
 
+                    // Hub
+                    gtk::ScrolledWindow {
+                        set_vexpand: true,
+                        set_hexpand: true,
+                        set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
+                        #[watch]
+                        set_visible: model.is_search_hub(),
+
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 28,
+                            set_margin_top: 36,
+                            set_margin_bottom: 32,
+                            set_margin_start: 24,
+                            set_margin_end: 24,
+                            set_valign: gtk::Align::Center,
+                            add_css_class: "search-hub",
+
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 14,
+                                set_halign: gtk::Align::Center,
+
+                                gtk::Box {
+                                    set_orientation: gtk::Orientation::Horizontal,
+                                    set_width_request: 72,
+                                    set_height_request: 72,
+                                    set_halign: gtk::Align::Center,
+                                    set_overflow: gtk::Overflow::Hidden,
+                                    add_css_class: "hub-logo-frame",
+
+                                    gtk::Picture {
+                                        set_content_fit: gtk::ContentFit::Contain,
+                                        set_can_shrink: true,
+                                        set_hexpand: true,
+                                        set_vexpand: true,
+                                        #[watch]
+                                        set_paintable: model.logo.as_ref(),
+                                        add_css_class: "app-logo",
+                                    },
+                                },
+
+                                gtk::Label {
+                                    set_label: "Librefood",
+                                    add_css_class: "hub-brand",
+                                    set_halign: gtk::Align::Center,
+                                    set_xalign: 0.5,
+                                },
+                                gtk::Label {
+                                    set_label: "Look up a product",
+                                    add_css_class: "hub-tagline",
+                                    set_halign: gtk::Align::Center,
+                                    set_xalign: 0.5,
+                                },
+                            },
+
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 10,
+                                set_hexpand: true,
+
+                                gtk::Button {
+                                    set_label: "Camera",
+                                    set_hexpand: true,
+                                    add_css_class: "suggested-action",
+                                    add_css_class: "mode-tile",
+                                    #[watch]
+                                    set_sensitive: model.camera_ok() && !model.scanning,
+                                    connect_clicked[sender] => move |_| {
+                                        sender.input(Msg::OpenSearchPane(SearchPane::Camera));
+                                    },
+                                },
+                                gtk::Button {
+                                    set_label: "Search by name",
+                                    set_hexpand: true,
+                                    add_css_class: "mode-tile",
+                                    connect_clicked[sender] => move |_| {
+                                        sender.input(Msg::OpenSearchPane(SearchPane::Text));
+                                    },
+                                },
+                                gtk::Button {
+                                    set_label: "Enter barcode",
+                                    set_hexpand: true,
+                                    add_css_class: "mode-tile",
+                                    connect_clicked[sender] => move |_| {
+                                        sender.input(Msg::OpenSearchPane(SearchPane::Ean));
+                                    },
+                                },
+                            },
+                        },
+                    },
+
+                    // Camera mode
                     gtk::Box {
                         set_orientation: gtk::Orientation::Vertical,
-                        set_spacing: 8,
-                        set_margin_top: 10,
-                        set_margin_bottom: 12,
-                        set_margin_start: 12,
-                        set_margin_end: 12,
-                        add_css_class: "lookup-page",
+                        set_spacing: 12,
+                        set_margin_top: 12,
+                        set_margin_bottom: 16,
+                        set_margin_start: 16,
+                        set_margin_end: 16,
+                        set_vexpand: true,
+                        #[watch]
+                        set_visible: model.is_search_camera(),
+                        add_css_class: "search-mode-page",
 
-                        // Compact brand: logo + title only (no tagline).
-                        gtk::Box {
-                            set_orientation: gtk::Orientation::Horizontal,
-                            set_spacing: 8,
+                        gtk::Label {
+                            set_label: "Center the barcode in the guide",
+                            add_css_class: "mode-heading",
                             set_halign: gtk::Align::Start,
-                            set_valign: gtk::Align::Center,
-
-                            // Fixed box so the paintable cannot inflate the row.
-                            gtk::Box {
-                                set_orientation: gtk::Orientation::Horizontal,
-                                set_width_request: 28,
-                                set_height_request: 28,
-                                set_hexpand: false,
-                                set_vexpand: false,
-                                set_overflow: gtk::Overflow::Hidden,
-
-                                gtk::Picture {
-                                    set_content_fit: gtk::ContentFit::Contain,
-                                    set_can_shrink: true,
-                                    set_hexpand: true,
-                                    set_vexpand: true,
-                                    #[watch]
-                                    set_paintable: model.logo.as_ref(),
-                                    add_css_class: "app-logo",
-                                    add_css_class: "lookup-logo",
-                                },
-                            },
-
-                            gtk::Label {
-                                set_label: "Librefood",
-                                add_css_class: "lookup-brand",
-                                set_halign: gtk::Align::Start,
-                                set_valign: gtk::Align::Center,
-                                set_xalign: 0.0,
-                            },
-                        },
-
-                        gtk::Box {
-                            #[watch]
-                            set_orientation: model.input_orientation(),
-                            set_spacing: 6,
-
-                            #[name = "barcode_entry"]
-                            gtk::Entry {
-                                set_hexpand: true,
-                                set_placeholder_text: Some("EAN-13 barcode…"),
-                                set_input_purpose: gtk::InputPurpose::Digits,
-                                connect_changed[sender] => move |entry| {
-                                    sender.input(Msg::BarcodeChanged(entry.text().to_string()));
-                                },
-                                connect_activate[sender] => move |_| {
-                                    sender.input(Msg::Lookup);
-                                },
-                            },
-
-                            gtk::Button {
-                                set_label: "Look up",
-                                add_css_class: "suggested-action",
-                                set_valign: gtk::Align::Center,
-                                #[watch]
-                                set_sensitive: !matches!(model.status_kind, StatusKind::Loading) && !model.scanning,
-                                connect_clicked[sender] => move |_| {
-                                    sender.input(Msg::Lookup);
-                                },
-                            },
-                        },
-
-                        gtk::Box {
-                            #[watch]
-                            set_orientation: model.input_orientation(),
-                            set_spacing: 6,
-
-                            gtk::Entry {
-                                set_hexpand: true,
-                                set_placeholder_text: Some("Search product name…"),
-                                connect_changed[sender] => move |entry| {
-                                    sender.input(Msg::SearchChanged(entry.text().to_string()));
-                                },
-                                connect_activate[sender] => move |_| {
-                                    sender.input(Msg::Search);
-                                },
-                            },
-                            gtk::Button {
-                                set_label: "Search",
-                                set_valign: gtk::Align::Center,
-                                #[watch]
-                                set_sensitive: !matches!(model.status_kind, StatusKind::Loading),
-                                connect_clicked[sender] => move |_| {
-                                    sender.input(Msg::Search);
-                                },
-                            },
-                        },
-
-                        #[name = "search_hits"]
-                        gtk::Box {
-                            set_orientation: gtk::Orientation::Vertical,
-                            set_spacing: 2,
-                            #[watch]
-                            set_visible: !model.search_hits.is_empty(),
-                        },
-
-                        gtk::Box {
-                            #[watch]
-                            set_orientation: model.input_orientation(),
-                            set_spacing: 6,
-
-                            #[name = "profile_dropdown"]
-                            gtk::DropDown {
-                                set_hexpand: true,
-                                #[watch]
-                                set_selected: model.active_profile_index,
-                                connect_selected_notify[sender] => move |dd| {
-                                    sender.input(Msg::ProfileSelected(dd.selected()));
-                                },
-                            },
-
-                            gtk::Button {
-                                set_label: "Profiles",
-                                set_valign: gtk::Align::Center,
-                                connect_clicked[sender] => move |_| {
-                                    sender.input(Msg::OpenProfilesPage);
-                                },
-                            },
-                            gtk::Button {
-                                set_label: "Compare",
-                                set_valign: gtk::Align::Center,
-                                #[watch]
-                                set_sensitive: model.product.is_some(),
-                                connect_clicked[sender] => move |_| {
-                                    sender.input(Msg::CompareProfiles);
-                                },
-                            },
-                        },
-
-                        gtk::Button {
-                            #[watch]
-                            set_label: model.scan_label(),
-                            set_hexpand: true,
-                            #[watch]
-                            set_sensitive: model.camera_ok() && !model.scanning,
-                            #[watch]
-                            set_visible: !model.scanning,
-                            connect_clicked[sender] => move |_| {
-                                sender.input(Msg::ScanCamera);
-                            },
+                            set_wrap: true,
+                            set_xalign: 0.0,
                         },
 
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
-                            set_spacing: 6,
-                            #[watch]
-                            set_visible: model.scanning,
+                            set_spacing: 8,
+                            set_vexpand: true,
                             add_css_class: "scan-panel",
-
-                            gtk::Label {
-                                set_label: "Center the barcode inside the guide",
-                                add_css_class: "scan-hint",
-                                set_halign: gtk::Align::Center,
-                                set_wrap: true,
-                                // Hide hint/guide chrome until a real frame arrives (no empty flash).
-                                #[watch]
-                                set_visible: model.preview.is_some(),
-                            },
 
                             gtk::Overlay {
                                 set_hexpand: true,
-                                set_height_request: 160,
+                                set_vexpand: true,
+                                set_height_request: 220,
                                 add_css_class: "scan-preview",
-                                #[watch]
-                                set_visible: model.preview.is_some(),
 
                                 #[wrap(Some)]
                                 set_child = &gtk::Picture {
@@ -1162,15 +1172,17 @@ impl Component for AppModel {
                                     set_halign: gtk::Align::Center,
                                     set_valign: gtk::Align::Center,
                                     set_can_target: false,
-                                    set_width_request: 200,
-                                    set_height_request: 90,
+                                    set_width_request: 220,
+                                    set_height_request: 100,
                                     add_css_class: "scan-guide",
+                                    #[watch]
+                                    set_visible: model.preview.is_some(),
                                 },
                             },
 
                             gtk::Box {
                                 set_orientation: gtk::Orientation::Horizontal,
-                                set_spacing: 6,
+                                set_spacing: 8,
                                 set_homogeneous: true,
 
                                 gtk::Button {
@@ -1185,9 +1197,11 @@ impl Component for AppModel {
                                     },
                                 },
                                 gtk::Button {
-                                    set_label: "Cancel scan",
+                                    set_label: "Cancel",
                                     add_css_class: "destructive-action",
                                     set_hexpand: true,
+                                    #[watch]
+                                    set_sensitive: model.scanning,
                                     connect_clicked[sender] => move |_| {
                                         sender.input(Msg::CancelScan);
                                     },
@@ -1203,6 +1217,77 @@ impl Component for AppModel {
                                 #[watch]
                                 set_visible: model.scanning && !model.scan_camera_label.is_empty(),
                             },
+                            gtk::Label {
+                                #[watch]
+                                set_label: &model.status_text,
+                                set_halign: gtk::Align::Start,
+                                set_wrap: true,
+                                set_xalign: 0.0,
+                                #[watch]
+                                set_css_classes: &[model.status_css()],
+                            },
+                            gtk::Spinner {
+                                set_halign: gtk::Align::Start,
+                                #[watch]
+                                set_spinning: model.scanning || matches!(model.status_kind, StatusKind::Loading),
+                                #[watch]
+                                set_visible: model.scanning || matches!(model.status_kind, StatusKind::Loading),
+                            },
+                        },
+                    },
+
+                    // Text search mode
+                    gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_spacing: 12,
+                        set_margin_top: 16,
+                        set_margin_bottom: 16,
+                        set_margin_start: 16,
+                        set_margin_end: 16,
+                        set_vexpand: true,
+                        #[watch]
+                        set_visible: model.is_search_text(),
+                        add_css_class: "search-mode-page",
+
+                        gtk::Label {
+                            set_label: "Search by name",
+                            add_css_class: "mode-heading",
+                            set_halign: gtk::Align::Start,
+                            set_xalign: 0.0,
+                        },
+                        gtk::Label {
+                            set_label: "Uses Open Food Facts product search.",
+                            add_css_class: "dim-label",
+                            set_halign: gtk::Align::Start,
+                            set_wrap: true,
+                            set_xalign: 0.0,
+                        },
+
+                        gtk::Box {
+                            #[watch]
+                            set_orientation: model.input_orientation(),
+                            set_spacing: 8,
+
+                            gtk::Entry {
+                                set_hexpand: true,
+                                set_placeholder_text: Some("Product name…"),
+                                connect_changed[sender] => move |entry| {
+                                    sender.input(Msg::SearchChanged(entry.text().to_string()));
+                                },
+                                connect_activate[sender] => move |_| {
+                                    sender.input(Msg::Search);
+                                },
+                            },
+                            gtk::Button {
+                                set_label: "Search",
+                                add_css_class: "suggested-action",
+                                set_valign: gtk::Align::Center,
+                                #[watch]
+                                set_sensitive: !matches!(model.status_kind, StatusKind::Loading),
+                                connect_clicked[sender] => move |_| {
+                                    sender.input(Msg::Search);
+                                },
+                            },
                         },
 
                         gtk::Label {
@@ -1214,32 +1299,131 @@ impl Component for AppModel {
                             #[watch]
                             set_css_classes: &[model.status_css()],
                         },
-
                         gtk::Spinner {
                             set_halign: gtk::Align::Start,
                             #[watch]
-                            set_spinning: matches!(model.status_kind, StatusKind::Loading) || model.scanning,
+                            set_spinning: matches!(model.status_kind, StatusKind::Loading),
                             #[watch]
-                            set_visible: matches!(model.status_kind, StatusKind::Loading) || model.scanning,
+                            set_visible: matches!(model.status_kind, StatusKind::Loading)
+                                && model.search_pane == SearchPane::Text,
+                        },
+
+                        gtk::ScrolledWindow {
+                            set_vexpand: true,
+                            set_hexpand: true,
+                            set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
+
+                            #[name = "search_hits"]
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 2,
+                            },
+                        },
+                    },
+
+                    // EAN-13 mode
+                    gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_spacing: 12,
+                        set_margin_top: 16,
+                        set_margin_bottom: 16,
+                        set_margin_start: 16,
+                        set_margin_end: 16,
+                        set_vexpand: true,
+                        #[watch]
+                        set_visible: model.is_search_ean(),
+                        add_css_class: "search-mode-page",
+
+                        gtk::Label {
+                            set_label: "Enter barcode",
+                            add_css_class: "mode-heading",
+                            set_halign: gtk::Align::Start,
+                            set_xalign: 0.0,
+                        },
+                        gtk::Label {
+                            set_label: "EAN-13 or similar digit barcode.",
+                            add_css_class: "dim-label",
+                            set_halign: gtk::Align::Start,
+                            set_wrap: true,
+                            set_xalign: 0.0,
                         },
 
                         gtk::Box {
-                            set_orientation: gtk::Orientation::Vertical,
-                            set_spacing: 10,
                             #[watch]
-                            set_visible: model.product.is_some(),
-                            add_css_class: "result-panel",
+                            set_orientation: model.input_orientation(),
+                            set_spacing: 8,
+
+                            #[name = "barcode_entry"]
+                            gtk::Entry {
+                                set_hexpand: true,
+                                set_placeholder_text: Some("EAN-13…"),
+                                set_input_purpose: gtk::InputPurpose::Digits,
+                                connect_changed[sender] => move |entry| {
+                                    sender.input(Msg::BarcodeChanged(entry.text().to_string()));
+                                },
+                                connect_activate[sender] => move |_| {
+                                    sender.input(Msg::Lookup);
+                                },
+                            },
+                            gtk::Button {
+                                set_label: "Look up",
+                                add_css_class: "suggested-action",
+                                set_valign: gtk::Align::Center,
+                                #[watch]
+                                set_sensitive: !matches!(model.status_kind, StatusKind::Loading) && !model.scanning,
+                                connect_clicked[sender] => move |_| {
+                                    sender.input(Msg::Lookup);
+                                },
+                            },
+                        },
+
+                        gtk::Label {
+                            #[watch]
+                            set_label: &model.status_text,
+                            set_halign: gtk::Align::Start,
+                            set_wrap: true,
+                            set_xalign: 0.0,
+                            #[watch]
+                            set_css_classes: &[model.status_css()],
+                        },
+                        gtk::Spinner {
+                            set_halign: gtk::Align::Start,
+                            #[watch]
+                            set_spinning: matches!(model.status_kind, StatusKind::Loading)
+                                && model.search_pane == SearchPane::Ean,
+                            #[watch]
+                            set_visible: matches!(model.status_kind, StatusKind::Loading)
+                                && model.search_pane == SearchPane::Ean,
+                        },
+                    },
+
+                    // Product detail
+                    gtk::ScrolledWindow {
+                        set_vexpand: true,
+                        set_hexpand: true,
+                        set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
+                        #[watch]
+                        set_visible: model.is_search_product(),
+
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 14,
+                            set_margin_top: 14,
+                            set_margin_bottom: 28,
+                            set_margin_start: 16,
+                            set_margin_end: 16,
+                            add_css_class: "product-page",
 
                             gtk::Box {
                                 #[watch]
                                 set_orientation: model.header_orientation(),
-                                set_spacing: 10,
+                                set_spacing: 12,
 
                                 gtk::Picture {
                                     set_content_fit: gtk::ContentFit::Cover,
                                     set_can_shrink: true,
-                                    set_width_request: 72,
-                                    set_height_request: 72,
+                                    set_width_request: 88,
+                                    set_height_request: 88,
                                     set_halign: gtk::Align::Start,
                                     set_hexpand: false,
                                     #[watch]
@@ -1277,7 +1461,7 @@ impl Component for AppModel {
                                     gtk::Box {
                                         set_orientation: gtk::Orientation::Horizontal,
                                         set_spacing: 10,
-                                        set_margin_top: 6,
+                                        set_margin_top: 8,
 
                                         gtk::Label {
                                             set_label: "●",
@@ -1303,36 +1487,58 @@ impl Component for AppModel {
                                             },
                                         },
                                     },
+                                },
+                            },
 
-                                    gtk::Label {
-                                        #[watch]
-                                        set_label: &model.profile_caption(),
-                                        add_css_class: "dim-label",
-                                        set_halign: gtk::Align::Start,
-                                        set_wrap: true,
-                                        set_xalign: 0.0,
-                                        set_margin_top: 4,
-                                        set_selectable: true,
-                                    },
-                                    gtk::Label {
-                                        #[watch]
-                                        set_label: &model.missing_caption(),
-                                        add_css_class: "missing-label",
-                                        set_halign: gtk::Align::Start,
-                                        set_wrap: true,
-                                        set_xalign: 0.0,
-                                        #[watch]
-                                        set_visible: !model.missing_caption().is_empty(),
-                                    },
+                            gtk::Label {
+                                #[watch]
+                                set_label: &model.profile_caption(),
+                                add_css_class: "dim-label",
+                                set_halign: gtk::Align::Start,
+                                set_wrap: true,
+                                set_xalign: 0.0,
+                                set_selectable: true,
+                            },
+                            gtk::Label {
+                                #[watch]
+                                set_label: &model.missing_caption(),
+                                add_css_class: "missing-label",
+                                set_halign: gtk::Align::Start,
+                                set_wrap: true,
+                                set_xalign: 0.0,
+                                #[watch]
+                                set_visible: !model.missing_caption().is_empty(),
+                            },
 
-                                    gtk::Button {
-                                        #[watch]
-                                        set_label: model.favorite_button_label(),
-                                        set_halign: gtk::Align::Start,
-                                        set_margin_top: 6,
-                                        connect_clicked[sender] => move |_| {
-                                            sender.input(Msg::ToggleFavorite);
-                                        },
+                            gtk::Box {
+                                #[watch]
+                                set_orientation: model.input_orientation(),
+                                set_spacing: 8,
+
+                                #[name = "profile_dropdown"]
+                                gtk::DropDown {
+                                    set_hexpand: true,
+                                    #[watch]
+                                    set_selected: model.active_profile_index,
+                                    connect_selected_notify[sender] => move |dd| {
+                                        sender.input(Msg::ProfileSelected(dd.selected()));
+                                    },
+                                },
+                                gtk::Button {
+                                    set_label: "Compare",
+                                    set_valign: gtk::Align::Center,
+                                    #[watch]
+                                    set_sensitive: model.product.is_some(),
+                                    connect_clicked[sender] => move |_| {
+                                        sender.input(Msg::CompareProfiles);
+                                    },
+                                },
+                                gtk::Button {
+                                    #[watch]
+                                    set_label: model.favorite_button_label(),
+                                    set_valign: gtk::Align::Center,
+                                    connect_clicked[sender] => move |_| {
+                                        sender.input(Msg::ToggleFavorite);
                                     },
                                 },
                             },
@@ -1394,7 +1600,6 @@ impl Component for AppModel {
                                 add_css_class: "explain-panel",
                             },
                         },
-
                     },
                 },
 
@@ -1414,12 +1619,6 @@ impl Component for AppModel {
                         set_margin_start: 20,
                         set_margin_end: 20,
 
-                        gtk::Label {
-                            set_label: "History",
-                            add_css_class: "brand-title",
-                            set_halign: gtk::Align::Start,
-                            set_xalign: 0.0,
-                        },
                         #[name = "history_search"]
                         gtk::Entry {
                             set_hexpand: true,
@@ -1460,12 +1659,6 @@ impl Component for AppModel {
                         set_margin_start: 20,
                         set_margin_end: 20,
 
-                        gtk::Label {
-                            set_label: "Favorites",
-                            add_css_class: "brand-title",
-                            set_halign: gtk::Align::Start,
-                            set_xalign: 0.0,
-                        },
                         #[name = "favorites_list"]
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
@@ -1495,12 +1688,6 @@ impl Component for AppModel {
                             set_margin_start: 16,
                             set_margin_end: 16,
 
-                            gtk::Label {
-                                set_label: "Profiles",
-                                add_css_class: "brand-title",
-                                set_halign: gtk::Align::Start,
-                                set_xalign: 0.0,
-                            },
                             gtk::Expander {
                                 set_label: Some("How scoring works"),
 
@@ -1697,6 +1884,8 @@ impl Component for AppModel {
             active_profile_index: 0,
             search_hits: vec![],
             page: page_init,
+            search_pane: SearchPane::Hub,
+            search_return: SearchPane::Hub,
             history: HistoryStore::open_default().unwrap_or_else(|e| {
                 eprintln!("history store: {e}");
                 let dir = std::env::temp_dir().join(format!("lf-hist-{}", std::process::id()));
@@ -1965,7 +2154,8 @@ impl Component for AppModel {
                 widgets.barcode_entry.set_text(&self.barcode);
                 self.search_hits.clear();
                 clear_box(&widgets.search_hits);
-                sender.input(Msg::Lookup);
+                self.search_return = SearchPane::Text;
+                queue_msg(&sender, Msg::Lookup);
             }
             Msg::LookupDone(result) => match result {
                 Ok(info) => {
@@ -1973,6 +2163,18 @@ impl Component for AppModel {
                     self.product_image = texture_from_bytes(info.image_bytes.as_deref());
                     self.product = Some(info);
                     self.page = AppPage::Lookup;
+                    // Remember mode page for Back; stay on hub if opened from library.
+                    if !matches!(
+                        self.search_pane,
+                        SearchPane::Camera | SearchPane::Text | SearchPane::Ean
+                    ) {
+                        self.search_return = SearchPane::Hub;
+                    } else {
+                        self.search_return = self.search_pane;
+                    }
+                    self.search_pane = SearchPane::Product;
+                    self.scanning = false;
+                    self.preview = None;
                     self.rescore();
                     self.record_current_to_history();
                     rebuild_history_list(
@@ -2019,13 +2221,6 @@ impl Component for AppModel {
                         }
                     }
                 }
-            }
-            Msg::OpenProfilesPage => {
-                self.editing_profile = false;
-                self.profile_editor = None;
-                queue_msg(&sender, Msg::ClearProfileEditor);
-                queue_msg(&sender, Msg::ShowPage(AppPage::Profiles));
-                schedule_profiles_ui_refresh(&sender);
             }
             Msg::Profiles(ev) => {
                 handle_profiles_event(self, widgets, root, sender.clone(), ev);
@@ -2126,6 +2321,16 @@ impl Component for AppModel {
                         &widgets.profiles_editor_footer,
                     );
                 }
+                if page == AppPage::Lookup {
+                    // Bottom-nav Search returns to the hub (cancel an open scan).
+                    if self.scanning {
+                        if let Some(ctrl) = &self.scan_control {
+                            ctrl.stop.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    self.search_pane = SearchPane::Hub;
+                    self.search_return = SearchPane::Hub;
+                }
                 self.page = page;
                 if page == AppPage::History {
                     rebuild_history_list(
@@ -2145,6 +2350,75 @@ impl Component for AppModel {
                         self.selected_profile_id = Some(self.store.active_id().to_string());
                     }
                     refresh_profiles_page(widgets, self, &sender);
+                }
+            }
+            Msg::OpenSearchPane(pane) => {
+                self.page = AppPage::Lookup;
+                match pane {
+                    SearchPane::Hub => {
+                        if self.scanning {
+                            if let Some(ctrl) = &self.scan_control {
+                                ctrl.stop.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        self.search_pane = SearchPane::Hub;
+                    }
+                    SearchPane::Camera => {
+                        self.search_pane = SearchPane::Camera;
+                        self.search_return = SearchPane::Camera;
+                        self.status_kind = StatusKind::Idle;
+                        self.status_text = "Starting camera…".into();
+                        queue_msg(&sender, Msg::ScanCamera);
+                    }
+                    SearchPane::Text => {
+                        self.search_pane = SearchPane::Text;
+                        self.search_return = SearchPane::Text;
+                        self.status_kind = StatusKind::Idle;
+                        self.status_text = String::new();
+                    }
+                    SearchPane::Ean => {
+                        self.search_pane = SearchPane::Ean;
+                        self.search_return = SearchPane::Ean;
+                        self.status_kind = StatusKind::Idle;
+                        self.status_text = String::new();
+                    }
+                    SearchPane::Product => {
+                        if self.product.is_some() {
+                            self.search_pane = SearchPane::Product;
+                        }
+                    }
+                }
+            }
+            Msg::SearchBack => {
+                match self.search_pane {
+                    SearchPane::Hub => {}
+                    SearchPane::Product => {
+                        self.search_pane = match self.search_return {
+                            SearchPane::Camera | SearchPane::Text | SearchPane::Ean => {
+                                self.search_return
+                            }
+                            _ => SearchPane::Hub,
+                        };
+                        // Don't auto-restart camera when backing from product.
+                        if self.search_pane == SearchPane::Camera && !self.scanning {
+                            self.status_text =
+                                "Tap Camera on the hub to scan again.".into();
+                            self.search_pane = SearchPane::Hub;
+                        }
+                    }
+                    SearchPane::Camera => {
+                        if self.scanning {
+                            if let Some(ctrl) = &self.scan_control {
+                                ctrl.stop.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        self.search_pane = SearchPane::Hub;
+                    }
+                    SearchPane::Text | SearchPane::Ean => {
+                        self.search_hits.clear();
+                        clear_box(&widgets.search_hits);
+                        self.search_pane = SearchPane::Hub;
+                    }
                 }
             }
             Msg::ToggleFavorite => {
@@ -2173,9 +2447,13 @@ impl Component for AppModel {
             }
             Msg::OpenLibraryBarcode(code) => {
                 self.page = AppPage::Lookup;
+                self.search_pane = SearchPane::Ean;
+                self.search_return = SearchPane::Hub;
                 self.barcode = off::normalize_barcode(&code);
                 widgets.barcode_entry.set_text(&self.barcode);
-                sender.input(Msg::Lookup);
+                self.status_kind = StatusKind::Loading;
+                self.status_text = format!("Looking up {}…", self.barcode);
+                queue_msg(&sender, Msg::Lookup);
             }
             Msg::ClearHistory => {
                 if let Err(e) = self.history.clear() {
@@ -2676,24 +2954,38 @@ fn load_css() {
             letter-spacing: -0.02em;
             color: #1a5c3a;
         }
-        .lookup-brand {
-            font-size: 1.1rem;
-            font-weight: 750;
-            letter-spacing: -0.02em;
+        .hub-brand {
+            font-size: 2.1rem;
+            font-weight: 800;
+            letter-spacing: -0.03em;
             color: #1a5c3a;
         }
+        .hub-tagline {
+            font-size: 1rem;
+            opacity: 0.65;
+        }
+        .hub-logo-frame {
+            border-radius: 16px;
+        }
+        .mode-tile {
+            min-height: 48px;
+            font-weight: 600;
+            border-radius: 12px;
+        }
+        .mode-heading {
+            font-size: 1.35rem;
+            font-weight: 750;
+            letter-spacing: -0.02em;
+        }
         .app-logo {
-            border-radius: 10px;
+            border-radius: 14px;
         }
-        .lookup-logo {
-            border-radius: 8px;
-        }
-        .product-name { font-size: 1.15rem; font-weight: 700; }
+        .product-name { font-size: 1.25rem; font-weight: 700; }
         .product-brand { font-size: 0.9rem; opacity: 0.65; }
         .product-image {
-            border-radius: 10px;
-            min-width: 64px;
-            min-height: 64px;
+            border-radius: 12px;
+            min-width: 72px;
+            min-height: 72px;
             background: alpha(@card_fg_color, 0.06);
         }
         .score-number {
@@ -2728,28 +3020,17 @@ fn load_css() {
         .missing-label { color: #9a5b00; font-size: 0.9rem; }
         .caption { opacity: 0.55; font-size: 0.85rem; }
         .explain-panel {
-            padding: 10px;
-            border-radius: 8px;
-            background: alpha(@card_fg_color, 0.03);
+            padding: 4px 0 8px;
         }
         .explain-line { font-size: 0.82rem; opacity: 0.8; }
-        .result-panel {
-            padding: 10px;
-            border-radius: 10px;
-            background: alpha(@card_fg_color, 0.04);
-            border: 1px solid alpha(@card_fg_color, 0.08);
-        }
         .scan-panel {
-            padding: 8px;
-            border-radius: 10px;
-            background: alpha(@card_fg_color, 0.03);
-            border: 1px solid alpha(@card_fg_color, 0.08);
+            padding: 0;
         }
         .scan-hint { font-weight: 600; opacity: 0.9; font-size: 0.9rem; }
         .scan-preview {
             background: #121212;
-            border-radius: 10px;
-            min-height: 120px;
+            border-radius: 14px;
+            min-height: 180px;
         }
         .scan-guide {
             border: 2px dashed alpha(#ffffff, 0.75);

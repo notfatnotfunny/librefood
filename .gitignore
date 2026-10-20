@@ -26,9 +26,9 @@
 *.pem
 *.key
 secrets/
-credentials*
-*token*
-*pat*
+.credentials
+github-pat
+github_token
 
 # Logs / temp
 *.log

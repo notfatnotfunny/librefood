@@ -37,6 +37,17 @@ fn pump_until(rx: &std::sync::mpsc::Receiver<()>) {
     }
 }
 
+/// Pump the GTK main loop until a modal channel yields a value.
+fn recv_modal<T>(rx: &std::sync::mpsc::Receiver<T>) -> T {
+    loop {
+        if let Ok(v) = rx.try_recv() {
+            return v;
+        }
+        while gtk::glib::MainContext::default().iteration(false) {}
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+}
+
 /// List / activate / duplicate / delete / import / export / edit profiles.
 pub fn run_manage_dialog(
     parent: &impl IsA<gtk::Window>,
@@ -63,6 +74,15 @@ pub fn run_manage_dialog(
     hint.set_wrap(true);
     hint.set_xalign(0.0);
     root.append(&hint);
+
+    let engine_notes = gtk::Expander::new(Some("How scoring works"));
+    let notes_lab = gtk::Label::new(Some(crate::engine::ENGINE_NOTES.trim()));
+    notes_lab.add_css_class("dim-label");
+    notes_lab.set_wrap(true);
+    notes_lab.set_xalign(0.0);
+    notes_lab.set_selectable(true);
+    engine_notes.set_child(Some(&notes_lab));
+    root.append(&engine_notes);
 
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::Single);
@@ -132,6 +152,7 @@ pub fn run_manage_dialog(
     let btn_export = gtk::Button::with_label("Export JSON");
     let btn_import = gtk::Button::with_label("Import JSON");
     let btn_delete = gtk::Button::with_label("Delete override");
+    let btn_restore = gtk::Button::with_label("Restore built-ins");
     let btn_close = gtk::Button::with_label("Close");
     for b in [
         &btn_new,
@@ -141,6 +162,7 @@ pub fn run_manage_dialog(
         &btn_export,
         &btn_import,
         &btn_delete,
+        &btn_restore,
         &btn_close,
     ] {
         btn_row.append(b);
@@ -336,13 +358,7 @@ pub fn run_manage_dialog(
                 }
             });
             ask.present();
-            let path = loop {
-                if let Ok(v) = rxi.try_recv() {
-                    break v;
-                }
-                while gtk::glib::MainContext::default().iteration(false) {}
-                std::thread::sleep(std::time::Duration::from_millis(16));
-            };
+            let path = recv_modal(&rxi);
             ask.destroy();
             if let Some(path) = path {
                 match std::fs::read_to_string(path.trim()) {
@@ -375,6 +391,24 @@ pub fn run_manage_dialog(
                     }
                     Err(e) => status.set_text(&e),
                 }
+            }
+        });
+    }
+    {
+        let refresh = refresh.clone();
+        let status = status.clone();
+        let changed = Rc::clone(&changed);
+        btn_restore.connect_clicked(move |_| {
+            let store = unsafe { &mut *store_ptr };
+            match store.restore_builtins() {
+                Ok(()) => {
+                    changed.set(true);
+                    refresh(store);
+                    status.set_text(
+                        "Built-in profiles restored from embedded defaults (user customs kept).",
+                    );
+                }
+                Err(e) => status.set_text(&e),
             }
         });
     }
@@ -477,15 +511,7 @@ fn ask_text_dialog(
 
     dialog.present();
     entry.grab_focus();
-    let mut result = None;
-    loop {
-        if let Ok(v) = rx.try_recv() {
-            result = v;
-            break;
-        }
-        while gtk::glib::MainContext::default().iteration(false) {}
-        std::thread::sleep(std::time::Duration::from_millis(16));
-    }
+    let result = recv_modal(&rx);
     dialog.destroy();
     result
 }
@@ -725,7 +751,7 @@ fn edit_profile_dialog(
                 3 => MissingDataPolicy::Incomplete,
                 _ => MissingDataPolicy::Ignore,
             };
-            let mut out = ScoringProfile {
+            let out = ScoringProfile {
                 id: profile_id.clone(),
                 name: name.text().to_string(),
                 description: profile_desc.clone(),
@@ -765,15 +791,7 @@ fn edit_profile_dialog(
     });
 
     dialog.present();
-    let mut result = None;
-    loop {
-        if let Ok(v) = rx.try_recv() {
-            result = v;
-            break;
-        }
-        while gtk::glib::MainContext::default().iteration(false) {}
-        std::thread::sleep(std::time::Duration::from_millis(16));
-    }
+    let result = recv_modal(&rx);
     dialog.destroy();
     result
 }

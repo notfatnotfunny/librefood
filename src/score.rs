@@ -26,9 +26,7 @@ pub struct FactorRow {
     pub detail: String,
     pub value_label: String,
     pub status: FactorStatus,
-    pub polarity: FactorPolarity,
     pub weighted_delta: f64,
-    pub source: String,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +35,7 @@ pub struct ScoreSummary {
     pub score_display: String,
     pub label: String,
     pub status: FactorStatus,
+    pub profile_id: String,
     pub profile_name: String,
     pub profile_version: u32,
     pub incomplete: bool,
@@ -52,30 +51,42 @@ pub fn summary_from_result(result: &ScoreResult) -> ScoreSummary {
     let mut explanation_lines = Vec::new();
 
     explanation_lines.push(format!(
-        "Profile “{}” v{} · base contributions below",
-        result.profile_name, result.profile_version
+        "Profile “{}” (`{}`) v{} · {} pts · base contributions below",
+        result.profile_name, result.profile_id, result.profile_version, result.score as u8
     ));
 
     for c in &result.contributions {
-        let detail = c
+        let rule_bit = c
             .rule_label
             .clone()
             .unwrap_or_else(|| c.note.clone());
+        let raw_bit = match c.raw_value {
+            Some(v) => format!("{v:.2}"),
+            None => "—".into(),
+        };
+        let adj_bit = match c.rule_adjust {
+            Some(a) => format!("{a:+.1}"),
+            None => "—".into(),
+        };
+        let detail = format!("{rule_bit} · src {}", c.source);
         let row = FactorRow {
             title: c.title.clone(),
             detail,
             value_label: c.value_label.clone(),
             status: FactorStatus::from(c.tone),
-            polarity: c.polarity,
             weighted_delta: c.weighted_delta,
-            source: c.source.clone(),
         };
         explanation_lines.push(format!(
-            "{title}: value={value} · Δ {delta:+.1} (w={w:.2}) · {note}",
+            "{title} [{id}/{attr}]: value={value} (raw={raw}) · adjust={adj} · Δ {delta:+.1} (w={w:.2}) · src={source} · {note}",
             title = c.title,
+            id = c.criterion_id,
+            attr = c.attribute,
             value = c.value_label,
+            raw = raw_bit,
+            adj = adj_bit,
             delta = c.weighted_delta,
             w = c.weight,
+            source = c.source,
             note = c.note
         ));
         match c.polarity {
@@ -85,9 +96,15 @@ pub fn summary_from_result(result: &ScoreResult) -> ScoreSummary {
     }
 
     for cap in &result.applied_caps {
+        let bounds = match (cap.max_score, cap.min_score) {
+            (Some(max), Some(min)) => format!("clamp [{min:.0}, {max:.0}]"),
+            (Some(max), None) => format!("max {max:.0}"),
+            (None, Some(min)) => format!("min {min:.0}"),
+            (None, None) => "no bound".into(),
+        };
         explanation_lines.push(format!(
-            "Cap applied: {} (attr {} = {})",
-            cap.label, cap.attribute, cap.raw_value
+            "Cap applied: {} (attr {} = {:.2}) · {}",
+            cap.label, cap.attribute, cap.raw_value, bounds
         ));
     }
     if result.incomplete {
@@ -99,6 +116,7 @@ pub fn summary_from_result(result: &ScoreResult) -> ScoreSummary {
         score_display: result.score_display.clone(),
         label: result.label.clone(),
         status: FactorStatus::from(result.tone),
+        profile_id: result.profile_id.clone(),
         profile_name: result.profile_name.clone(),
         profile_version: result.profile_version,
         incomplete: result.incomplete,

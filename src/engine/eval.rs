@@ -1,9 +1,11 @@
 //! Deterministic scoring engine — identical inputs ⇒ identical results.
 
 use super::schema::{
-    Criterion, FactorPolarity, MissingDataPolicy, ScoreCap, ScoringProfile, ThresholdRule, Tone,
-    When,
+    Criterion, FactorPolarity, MissingDataPolicy, ScoreCap, ScoringProfile, Tone,
 };
+
+#[cfg(test)]
+use super::schema::{ThresholdRule, When};
 use crate::product::{AttrAvailability, ProductModel};
 
 /// One explained step in the calculation.

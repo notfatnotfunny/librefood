@@ -304,11 +304,13 @@ impl AppModel {
         self.page == AppPage::Profiles && self.editing_profile
     }
 
-    fn nav_classes(&self, page: AppPage) -> [&'static str; 3] {
+    fn nav_classes(&self, page: AppPage) -> [&'static str; 2] {
+        // Avoid flat+suggested-action: pressed/active became unreadable on the
+        // raised bottom bar. Custom classes keep contrast in light and dark.
         if self.page == page {
-            ["flat", "suggested-action", "bottom-nav-btn"]
+            ["bottom-nav-btn", "bottom-nav-active"]
         } else {
-            ["flat", "nav-inactive", "bottom-nav-btn"]
+            ["bottom-nav-btn", "bottom-nav-idle"]
         }
     }
 
@@ -898,58 +900,61 @@ impl Component for AppModel {
                 gtk::ScrolledWindow {
                     set_vexpand: true,
                     set_hexpand: true,
+                    set_propagate_natural_height: false,
                     set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
                     #[watch]
                     set_visible: model.is_lookup_page(),
 
                     gtk::Box {
                         set_orientation: gtk::Orientation::Vertical,
-                        set_spacing: 16,
-                        set_margin_top: 18,
-                        set_margin_bottom: 28,
-                        set_margin_start: 20,
-                        set_margin_end: 20,
+                        set_spacing: 8,
+                        set_margin_top: 10,
+                        set_margin_bottom: 12,
+                        set_margin_start: 12,
+                        set_margin_end: 12,
+                        add_css_class: "lookup-page",
 
+                        // Compact brand: logo + title only (no tagline).
                         gtk::Box {
                             set_orientation: gtk::Orientation::Horizontal,
-                            set_spacing: 12,
+                            set_spacing: 8,
                             set_halign: gtk::Align::Start,
+                            set_valign: gtk::Align::Center,
 
-                            gtk::Picture {
-                                set_content_fit: gtk::ContentFit::Contain,
-                                set_can_shrink: false,
-                                set_width_request: 56,
-                                set_height_request: 56,
-                                set_halign: gtk::Align::Start,
-                                #[watch]
-                                set_paintable: model.logo.as_ref(),
-                                add_css_class: "app-logo",
+                            // Fixed box so the paintable cannot inflate the row.
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Horizontal,
+                                set_width_request: 28,
+                                set_height_request: 28,
+                                set_hexpand: false,
+                                set_vexpand: false,
+                                set_overflow: gtk::Overflow::Hidden,
+
+                                gtk::Picture {
+                                    set_content_fit: gtk::ContentFit::Contain,
+                                    set_can_shrink: true,
+                                    set_hexpand: true,
+                                    set_vexpand: true,
+                                    #[watch]
+                                    set_paintable: model.logo.as_ref(),
+                                    add_css_class: "app-logo",
+                                    add_css_class: "lookup-logo",
+                                },
                             },
 
-                            gtk::Box {
-                                set_orientation: gtk::Orientation::Vertical,
-                                set_spacing: 2,
+                            gtk::Label {
+                                set_label: "Librefood",
+                                add_css_class: "lookup-brand",
+                                set_halign: gtk::Align::Start,
                                 set_valign: gtk::Align::Center,
-
-                                gtk::Label {
-                                    set_label: "Librefood",
-                                    add_css_class: "brand-title",
-                                    set_halign: gtk::Align::Start,
-                                    set_xalign: 0.0,
-                                },
-                                gtk::Label {
-                                    set_label: "Open Food Facts data · your scoring profiles",
-                                    add_css_class: "dim-label",
-                                    set_halign: gtk::Align::Start,
-                                    set_xalign: 0.0,
-                                },
+                                set_xalign: 0.0,
                             },
                         },
 
                         gtk::Box {
                             #[watch]
                             set_orientation: model.input_orientation(),
-                            set_spacing: 10,
+                            set_spacing: 6,
 
                             #[name = "barcode_entry"]
                             gtk::Entry {
@@ -979,7 +984,7 @@ impl Component for AppModel {
                         gtk::Box {
                             #[watch]
                             set_orientation: model.input_orientation(),
-                            set_spacing: 10,
+                            set_spacing: 6,
 
                             gtk::Entry {
                                 set_hexpand: true,
@@ -1005,7 +1010,7 @@ impl Component for AppModel {
                         #[name = "search_hits"]
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
-                            set_spacing: 4,
+                            set_spacing: 2,
                             #[watch]
                             set_visible: !model.search_hits.is_empty(),
                         },
@@ -1013,7 +1018,7 @@ impl Component for AppModel {
                         gtk::Box {
                             #[watch]
                             set_orientation: model.input_orientation(),
-                            set_spacing: 10,
+                            set_spacing: 6,
 
                             #[name = "profile_dropdown"]
                             gtk::DropDown {
@@ -1058,7 +1063,7 @@ impl Component for AppModel {
 
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
-                            set_spacing: 10,
+                            set_spacing: 6,
                             #[watch]
                             set_visible: model.scanning,
                             add_css_class: "scan-panel",
@@ -1075,7 +1080,7 @@ impl Component for AppModel {
 
                             gtk::Overlay {
                                 set_hexpand: true,
-                                set_height_request: 260,
+                                set_height_request: 160,
                                 add_css_class: "scan-preview",
                                 #[watch]
                                 set_visible: model.preview.is_some(),
@@ -1094,8 +1099,8 @@ impl Component for AppModel {
                                     set_halign: gtk::Align::Center,
                                     set_valign: gtk::Align::Center,
                                     set_can_target: false,
-                                    set_width_request: 240,
-                                    set_height_request: 110,
+                                    set_width_request: 200,
+                                    set_height_request: 90,
                                     add_css_class: "scan-guide",
                                 },
                             },
@@ -1130,7 +1135,7 @@ impl Component for AppModel {
 
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
-                            set_spacing: 14,
+                            set_spacing: 10,
                             #[watch]
                             set_visible: model.product.is_some(),
                             add_css_class: "result-panel",
@@ -1138,13 +1143,13 @@ impl Component for AppModel {
                             gtk::Box {
                                 #[watch]
                                 set_orientation: model.header_orientation(),
-                                set_spacing: 16,
+                                set_spacing: 10,
 
                                 gtk::Picture {
                                     set_content_fit: gtk::ContentFit::Cover,
-                                    set_can_shrink: false,
-                                    set_width_request: 96,
-                                    set_height_request: 96,
+                                    set_can_shrink: true,
+                                    set_width_request: 72,
+                                    set_height_request: 72,
                                     set_halign: gtk::Align::Start,
                                     set_hexpand: false,
                                     #[watch]
@@ -2391,15 +2396,24 @@ fn load_css() {
             letter-spacing: -0.02em;
             color: #1a5c3a;
         }
+        .lookup-brand {
+            font-size: 1.1rem;
+            font-weight: 750;
+            letter-spacing: -0.02em;
+            color: #1a5c3a;
+        }
         .app-logo {
             border-radius: 10px;
         }
-        .product-name { font-size: 1.2rem; font-weight: 700; }
-        .product-brand { font-size: 0.95rem; opacity: 0.65; }
+        .lookup-logo {
+            border-radius: 8px;
+        }
+        .product-name { font-size: 1.15rem; font-weight: 700; }
+        .product-brand { font-size: 0.9rem; opacity: 0.65; }
         .product-image {
             border-radius: 10px;
-            min-width: 96px;
-            min-height: 96px;
+            min-width: 64px;
+            min-height: 64px;
             background: alpha(@card_fg_color, 0.06);
         }
         .score-number {
@@ -2440,22 +2454,22 @@ fn load_css() {
         }
         .explain-line { font-size: 0.82rem; opacity: 0.8; }
         .result-panel {
-            padding: 16px;
-            border-radius: 12px;
+            padding: 10px;
+            border-radius: 10px;
             background: alpha(@card_fg_color, 0.04);
             border: 1px solid alpha(@card_fg_color, 0.08);
         }
         .scan-panel {
-            padding: 12px;
-            border-radius: 12px;
+            padding: 8px;
+            border-radius: 10px;
             background: alpha(@card_fg_color, 0.03);
             border: 1px solid alpha(@card_fg_color, 0.08);
         }
-        .scan-hint { font-weight: 600; opacity: 0.9; }
+        .scan-hint { font-weight: 600; opacity: 0.9; font-size: 0.9rem; }
         .scan-preview {
             background: #121212;
             border-radius: 10px;
-            min-height: 220px;
+            min-height: 120px;
         }
         .scan-guide {
             border: 2px dashed alpha(#ffffff, 0.75);
@@ -2467,7 +2481,6 @@ fn load_css() {
         .status-err { color: #a40000; }
         .status-loading { opacity: 0.85; }
         .status-idle { opacity: 0.8; }
-        .nav-inactive { opacity: 0.85; }
         .bottom-nav {
             padding: 4px 4px 6px;
             min-height: 48px;
@@ -2477,6 +2490,39 @@ fn load_css() {
             padding: 8px 2px;
             font-size: 0.82rem;
             font-weight: 600;
+            border-radius: 8px;
+            /* Keep label = window fg so press/active never vanish into the bar. */
+            color: alpha(@window_fg_color, 0.78);
+            background-color: transparent;
+            opacity: 1;
+        }
+        .bottom-nav-btn label {
+            color: inherit;
+        }
+        .bottom-nav-btn:hover {
+            color: @window_fg_color;
+            background-color: alpha(@window_fg_color, 0.10);
+        }
+        .bottom-nav-btn:active {
+            color: @window_fg_color;
+            background-color: alpha(@window_fg_color, 0.16);
+        }
+        .bottom-nav-idle {
+            opacity: 1;
+        }
+        /* Tint + underline — readable in light and dark (avoid accent_fg on accent_bg). */
+        .bottom-nav-active {
+            font-weight: 700;
+            color: @window_fg_color;
+            background-color: alpha(@accent_bg_color, 0.38);
+            box-shadow: inset 0 -3px 0 0 @accent_bg_color;
+        }
+        .bottom-nav-active:hover,
+        .bottom-nav-active:active {
+            color: @window_fg_color;
+            background-color: alpha(@accent_bg_color, 0.50);
+            box-shadow: inset 0 -3px 0 0 @accent_bg_color;
+            opacity: 1;
         }
         .library-row {
             padding: 6px 0;

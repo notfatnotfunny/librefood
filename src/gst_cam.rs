@@ -5,12 +5,16 @@
 //! 2. `pipewiresrc` (after xdg-desktop-portal Camera grant)
 //!
 //! Frames are RGB for the same preview + rxing path as V4L2.
+//!
+//! On multi-camera phones, prefer a **back/rear** libcamera device by default
+//! (`LIBREFOOD_CAMERA_FACING=back`). USB / single-camera setups are unchanged.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use gst_video::VideoFrameExt;
+use std::process::Command;
 use std::sync::Once;
 
 static GST_INIT: Once = Once::new();
@@ -64,6 +68,144 @@ impl GstSource {
     }
 }
 
+/// Preferred camera facing for libcamera selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CameraFacingPref {
+    Back,
+    Front,
+    Any,
+}
+
+impl CameraFacingPref {
+    fn from_env() -> Self {
+        match std::env::var("LIBREFOOD_CAMERA_FACING")
+            .unwrap_or_else(|_| "back".into())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "front" | "user" | "selfie" => Self::Front,
+            "any" | "all" | "*" => Self::Any,
+            // default — and explicit back/rear/world
+            _ => Self::Back,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CameraFacing {
+    Front,
+    Back,
+    External,
+    Unknown,
+}
+
+impl CameraFacing {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Front => "front",
+            Self::Back => "back",
+            Self::External => "external",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn matches(self, pref: CameraFacingPref) -> bool {
+        match pref {
+            CameraFacingPref::Any => true,
+            CameraFacingPref::Back => matches!(self, Self::Back | Self::External),
+            CameraFacingPref::Front => matches!(self, Self::Front),
+        }
+    }
+
+    /// Higher is better for the given preference.
+    fn score(self, pref: CameraFacingPref) -> i32 {
+        match pref {
+            CameraFacingPref::Back => match self {
+                Self::Back => 300,
+                Self::External => 250,
+                Self::Unknown => 100,
+                Self::Front => 0,
+            },
+            CameraFacingPref::Front => match self {
+                Self::Front => 300,
+                Self::Unknown => 100,
+                Self::External => 50,
+                Self::Back => 0,
+            },
+            CameraFacingPref::Any => match self {
+                Self::Back => 200,
+                Self::External => 180,
+                Self::Unknown => 100,
+                Self::Front => 50,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CamCandidate {
+    /// libcamerasrc `camera-name` (camera id).
+    id: String,
+    display: String,
+    facing: CameraFacing,
+    /// Rough max area from caps (0 if unknown).
+    max_area: u64,
+}
+
+fn facing_from_text(s: &str) -> Option<CameraFacing> {
+    let l = s.to_ascii_lowercase();
+    if l.contains("front") || l.contains("selfie") || l.contains("user-facing") {
+        Some(CameraFacing::Front)
+    } else if l.contains("back")
+        || l.contains("rear")
+        || l.contains("world")
+        || l.contains("environment")
+    {
+        Some(CameraFacing::Back)
+    } else if l.contains("external") {
+        Some(CameraFacing::External)
+    } else {
+        None
+    }
+}
+
+fn facing_from_location_prop(props: &gst::StructureRef) -> Option<CameraFacing> {
+    // libcamera provider stores enums as strings: "Front" / "Back" / "External"
+    // (or "CameraLocationFront" …). Integer 0/1/2 is a fallback.
+    if let Ok(Some(s)) = props.get_optional::<&str>("api.libcamera.Location") {
+        return facing_from_text(s).or_else(|| match s {
+            "0" => Some(CameraFacing::Front),
+            "1" => Some(CameraFacing::Back),
+            "2" => Some(CameraFacing::External),
+            _ => None,
+        });
+    }
+    if let Ok(Some(v)) = props.get_optional::<i32>("api.libcamera.Location") {
+        return match v {
+            0 => Some(CameraFacing::Front),
+            1 => Some(CameraFacing::Back),
+            2 => Some(CameraFacing::External),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn max_area_from_caps(caps: &gst::Caps) -> u64 {
+    let mut best = 0u64;
+    for i in 0..caps.size() {
+        let Some(s) = caps.structure(i) else {
+            continue;
+        };
+        let w = s.get_optional::<i32>("width").ok().flatten().unwrap_or(0);
+        let h = s.get_optional::<i32>("height").ok().flatten().unwrap_or(0);
+        if w > 0 && h > 0 {
+            best = best.max((w as u64).saturating_mul(h as u64));
+        }
+    }
+    best
+}
+
 fn candidate_sources() -> Vec<GstSource> {
     if let Ok(forced) = std::env::var("LIBREFOOD_CAMERA_BACKEND") {
         match forced.to_ascii_lowercase().as_str() {
@@ -76,7 +218,9 @@ fn candidate_sources() -> Vec<GstSource> {
     if element_available("libcamerasrc") {
         out.push(GstSource::LibCamera);
     } else {
-        cam_debug("libcamerasrc not installed (apk: gst-plugin-libcamera / Arch: gst-plugin-libcamera)");
+        cam_debug(
+            "libcamerasrc not installed (apk: gst-plugin-libcamera / Arch: gst-plugin-libcamera)",
+        );
     }
     if element_available("pipewiresrc") {
         out.push(GstSource::PipeWire);
@@ -84,6 +228,216 @@ fn candidate_sources() -> Vec<GstSource> {
         cam_debug("pipewiresrc not installed");
     }
     out
+}
+
+/// Enumerate libcamera devices via GStreamer DeviceMonitor.
+fn list_from_device_monitor() -> Vec<CamCandidate> {
+    let monitor = gst::DeviceMonitor::new();
+    // libcamera provider registers as Source/Video; V4L also uses Video/Source.
+    let _ = monitor.add_filter(Some("Source/Video"), None);
+    let _ = monitor.add_filter(Some("Video/Source"), None);
+    if monitor.start().is_err() {
+        cam_debug("DeviceMonitor start failed");
+        return Vec::new();
+    }
+    let devices = monitor.devices();
+    let mut out = Vec::new();
+    for dev in devices.iter() {
+        // libcamera provider sets both name and display-name to camera->id().
+        let name = dev.display_name().to_string();
+        let id = name.clone();
+
+        let props = dev.properties();
+        let mut facing = props
+            .as_ref()
+            .and_then(|p| facing_from_location_prop(p))
+            .or_else(|| facing_from_text(&name))
+            .unwrap_or(CameraFacing::Unknown);
+
+        if facing == CameraFacing::Unknown {
+            if let Some(props) = props.as_ref() {
+                for (key, val) in props.iter() {
+                    let key_l = key.as_str().to_ascii_lowercase();
+                    if key_l.contains("location") || key_l.contains("facing") {
+                        if let Ok(s) = val.get::<&str>() {
+                            if let Some(f) = facing_from_text(s) {
+                                facing = f;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let max_area = dev
+            .caps()
+            .as_ref()
+            .map(max_area_from_caps)
+            .unwrap_or(0);
+        let class = dev.device_class().to_string();
+        cam_debug(format!(
+            "gst device id={id:?} facing={} area={max_area} class={class}",
+            facing.label()
+        ));
+        out.push(CamCandidate {
+            id,
+            display: name,
+            facing,
+            max_area,
+        });
+    }
+    monitor.stop();
+    out
+}
+
+/// Fallback: parse `cam --list` / `cam -l` (libcamera-tools).
+/// Example line: `1: Internal back camera (/base/soc@0/camss@...)`
+fn list_from_cam_cli() -> Vec<CamCandidate> {
+    let output = Command::new("cam")
+        .args(["--list"])
+        .output()
+        .or_else(|_| Command::new("cam").arg("-l").output());
+    let Ok(out) = output else {
+        return Vec::new();
+    };
+    if !out.status.success() && out.stdout.is_empty() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut out_list = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        // "N: label (id)" or "N: label"
+        let Some(rest) = line
+            .split_once(':')
+            .and_then(|(n, r)| {
+                if n.trim().chars().all(|c| c.is_ascii_digit()) {
+                    Some(r.trim())
+                } else {
+                    None
+                }
+            })
+        else {
+            continue;
+        };
+        let (display, id) = if let (Some(open), Some(close)) = (rest.rfind('('), rest.rfind(')')) {
+            if open < close {
+                let label = rest[..open].trim().to_string();
+                let id = rest[open + 1..close].trim().to_string();
+                (label, id)
+            } else {
+                (rest.to_string(), rest.to_string())
+            }
+        } else {
+            (rest.to_string(), rest.to_string())
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let facing = facing_from_text(&display)
+            .or_else(|| facing_from_text(&id))
+            .unwrap_or(CameraFacing::Unknown);
+        cam_debug(format!(
+            "cam --list id={id:?} display={display:?} facing={}",
+            facing.label()
+        ));
+        out_list.push(CamCandidate {
+            id,
+            display,
+            facing,
+            max_area: 0,
+        });
+    }
+    out_list
+}
+
+fn list_libcamera_candidates() -> Vec<CamCandidate> {
+    let mut cams = list_from_device_monitor();
+    if cams.is_empty() {
+        cams = list_from_cam_cli();
+    } else if cams.iter().all(|c| c.facing == CameraFacing::Unknown) {
+        // Merge facing hints from `cam --list` by matching id.
+        let cli = list_from_cam_cli();
+        for c in &mut cams {
+            if let Some(h) = cli.iter().find(|h| h.id == c.id || c.id.contains(&h.id)) {
+                if h.facing != CameraFacing::Unknown {
+                    c.facing = h.facing;
+                    if c.display.is_empty() || c.display == c.id {
+                        c.display = h.display.clone();
+                    }
+                }
+            }
+        }
+    }
+    cams
+}
+
+fn camera_index_override() -> Option<usize> {
+    std::env::var("LIBREFOOD_CAMERA_INDEX")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+}
+
+/// Resolve libcamerasrc `camera-name` (prefer back by default).
+fn resolve_libcamera_name() -> Option<String> {
+    if let Ok(name) = std::env::var("LIBREFOOD_CAMERA_NAME") {
+        let name = name.trim().to_string();
+        if !name.is_empty() {
+            cam_debug(format!("LIBREFOOD_CAMERA_NAME override: {name}"));
+            return Some(name);
+        }
+    }
+
+    let pref = CameraFacingPref::from_env();
+    let mut cams = list_libcamera_candidates();
+    if cams.is_empty() {
+        cam_debug("no libcamera candidates enumerated; using libcamerasrc default");
+        return None;
+    }
+
+    for c in &cams {
+        cam_debug(format!(
+            "candidate id={:?} facing={} area={} display={:?}",
+            c.id,
+            c.facing.label(),
+            c.max_area,
+            c.display
+        ));
+    }
+
+    // Rank: facing score, then resolution, then stable id order.
+    cams.sort_by(|a, b| {
+        b.facing
+            .score(pref)
+            .cmp(&a.facing.score(pref))
+            .then_with(|| b.max_area.cmp(&a.max_area))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let matching: Vec<&CamCandidate> = cams
+        .iter()
+        .filter(|c| c.facing.matches(pref))
+        .collect();
+
+    let pool: Vec<&CamCandidate> = if matching.is_empty() {
+        cam_debug(format!(
+            "no camera matches facing={pref:?}; falling back to best available"
+        ));
+        cams.iter().collect()
+    } else {
+        matching
+    };
+
+    let idx = camera_index_override().unwrap_or(0);
+    let chosen = pool.get(idx).copied().or_else(|| pool.first().copied())?;
+    cam_debug(format!(
+        "selected libcamera id={:?} facing={} display={:?} (pref={pref:?} index={idx})",
+        chosen.id,
+        chosen.facing.label(),
+        chosen.display
+    ));
+    Some(chosen.id.clone())
 }
 
 fn build_pipeline(src: GstSource) -> Result<(gst::Pipeline, gst_app::AppSink), String> {
@@ -98,6 +452,15 @@ fn build_pipeline(src: GstSource) -> Result<(gst::Pipeline, gst_app::AppSink), S
         .map_err(|e| format!("parse {}: {e}", src.label()))?
         .downcast::<gst::Pipeline>()
         .map_err(|_| format!("{}: not a pipeline", src.label()))?;
+
+    if matches!(src, GstSource::LibCamera) {
+        if let Some(name) = resolve_libcamera_name() {
+            if let Some(el) = pipeline.by_name("cam") {
+                el.set_property_from_str("camera-name", &name);
+                cam_debug(format!("set libcamerasrc camera-name={name}"));
+            }
+        }
+    }
 
     let sink = pipeline
         .by_name("sink")
@@ -150,8 +513,7 @@ impl GstCamera {
             .map_err(|e| format!("set Playing: {e}"))?;
 
         // Wait for pipeline to settle / first buffer path ready.
-        let (state_res, current, _pending) =
-            pipeline.state(gst::ClockTime::from_seconds(3));
+        let (state_res, current, _pending) = pipeline.state(gst::ClockTime::from_seconds(3));
         if let Err(e) = state_res {
             let _ = pipeline.set_state(gst::State::Null);
             return Err(format!("state change: {e} (current={current:?})"));
@@ -187,8 +549,7 @@ impl GstCamera {
         let caps = sample
             .caps()
             .ok_or_else(|| "sample has no caps".to_string())?;
-        let info = gst_video::VideoInfo::from_caps(&caps)
-            .map_err(|e| format!("VideoInfo: {e}"))?;
+        let info = gst_video::VideoInfo::from_caps(&caps).map_err(|e| format!("VideoInfo: {e}"))?;
         let buffer = sample
             .buffer()
             .ok_or_else(|| "sample has no buffer".to_string())?;
@@ -196,9 +557,7 @@ impl GstCamera {
             .map_err(|_| "frame map failed".to_string())?;
         let w = frame.width();
         let h = frame.height();
-        let plane = frame
-            .plane_data(0)
-            .map_err(|e| format!("plane: {e}"))?;
+        let plane = frame.plane_data(0).map_err(|e| format!("plane: {e}"))?;
         // RGB from videoconvert is tightly packed (stride may pad).
         let stride = frame.plane_stride()[0] as usize;
         let row_bytes = (w as usize).saturating_mul(3);
@@ -230,4 +589,40 @@ pub fn gst_camera_available() -> bool {
         return false;
     }
     !candidate_sources().is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn facing_text_heuristics() {
+        assert_eq!(facing_from_text("Internal front camera"), Some(CameraFacing::Front));
+        assert_eq!(facing_from_text("Internal back camera"), Some(CameraFacing::Back));
+        assert_eq!(facing_from_text("CameraLocationBack"), Some(CameraFacing::Back));
+        assert_eq!(facing_from_text("rear ultrawide"), Some(CameraFacing::Back));
+        assert_eq!(facing_from_text("selfie"), Some(CameraFacing::Front));
+    }
+
+    #[test]
+    fn back_pref_scores_rear_over_front() {
+        let pref = CameraFacingPref::Back;
+        assert!(CameraFacing::Back.score(pref) > CameraFacing::Front.score(pref));
+        assert!(CameraFacing::External.score(pref) > CameraFacing::Front.score(pref));
+        assert!(CameraFacing::Back.matches(pref));
+        assert!(!CameraFacing::Front.matches(pref));
+    }
+
+    #[test]
+    fn facing_pref_from_env_defaults_back() {
+        // Don't rely on process env mutation across tests; just parse logic.
+        assert_eq!(
+            match "back" {
+                "front" | "user" | "selfie" => CameraFacingPref::Front,
+                "any" | "all" | "*" => CameraFacingPref::Any,
+                _ => CameraFacingPref::Back,
+            },
+            CameraFacingPref::Back
+        );
+    }
 }

@@ -79,10 +79,20 @@ sudo pacman -S libcamera gst-plugin-libcamera pipewire
 
 | Variable | Purpose |
 |---|---|
-| `LIBREFOOD_CAMERA_DEBUG=1` | Log probe / backend / STREAMON errors |
+| `LIBREFOOD_CAMERA_DEBUG=1` | Log probe / backend / STREAMON / chosen facing |
 | `LIBREFOOD_CAMERA_DEVICE=/dev/video0` | Force a V4L2 node (USB) |
 | `LIBREFOOD_CAMERA_BACKEND=auto` | Default: libcamera first on CAMSS, else V4L2 then gst |
 | `…=libcamera` / `pipewire` / `v4l2` | Force one backend |
+| `LIBREFOOD_CAMERA_FACING=back` | Prefer rear cameras (default). `front` / `any` also OK |
+| `LIBREFOOD_CAMERA_NAME=…` | Exact libcamera id (`cam --list` id in parentheses) |
+| `LIBREFOOD_CAMERA_INDEX=0` | Among matching facing cams, pick Nth (0 = primary rear) |
+
+On fajita (multiple cams), default is **back**. List ids with `cam --list`, then e.g. second rear:
+
+```bash
+LIBREFOOD_CAMERA_FACING=back LIBREFOOD_CAMERA_INDEX=1 LIBREFOOD_CAMERA_DEBUG=1 ./target/release/librefood
+# or: LIBREFOOD_CAMERA_NAME='/base/soc@0/…'
+```
 
 Optional portal packages (permission dialog for PipeWire path): `xdg-desktop-portal`, pipewire.
 

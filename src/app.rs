@@ -36,7 +36,8 @@ pub enum Msg {
     CancelScan,
     WidthChanged(i32),
     ProfileSelected(u32),
-    ManageProfiles,
+    OpenProfilesPage,
+    Profiles(ui_profiles::ProfilePageEvent),
     Rescore,
     CompareProfiles,
     ShowPage(AppPage),
@@ -51,6 +52,7 @@ pub enum AppPage {
     Lookup,
     History,
     Favorites,
+    Profiles,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +107,10 @@ pub struct AppModel {
     page: AppPage,
     history: HistoryStore,
     favorites: FavoritesStore,
+    selected_profile_id: Option<String>,
+    profiles_status: String,
+    editing_profile: bool,
+    profile_editor: Option<ui_profiles::EditorHandle>,
 }
 
 impl AppModel {
@@ -277,6 +283,14 @@ impl AppModel {
         self.page == AppPage::Favorites
     }
 
+    fn is_profiles_list(&self) -> bool {
+        self.page == AppPage::Profiles && !self.editing_profile
+    }
+
+    fn is_profiles_editor(&self) -> bool {
+        self.page == AppPage::Profiles && self.editing_profile
+    }
+
     fn nav_classes(&self, page: AppPage) -> [&'static str; 2] {
         if self.page == page {
             ["flat", "suggested-action"]
@@ -312,6 +326,261 @@ impl AppModel {
 fn clear_box(container: &gtk::Box) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
+    }
+}
+
+fn profiles_emit(sender: &ComponentSender<AppModel>) -> std::rc::Rc<dyn Fn(ui_profiles::ProfilePageEvent)> {
+    let sender = sender.clone();
+    std::rc::Rc::new(move |ev| sender.input(Msg::Profiles(ev)))
+}
+
+fn refresh_profiles_page(
+    widgets: &AppModelWidgets,
+    model: &AppModel,
+    sender: &ComponentSender<AppModel>,
+) {
+    let emit = profiles_emit(sender);
+    ui_profiles::rebuild_profile_list(
+        &widgets.profiles_list,
+        &model.store,
+        model.selected_profile_id.as_deref(),
+        &emit,
+    );
+    ui_profiles::rebuild_profile_actions(&widgets.profiles_actions, &emit);
+}
+
+fn sync_profile_dropdown(widgets: &AppModelWidgets, model: &AppModel) {
+    let string_list = gtk::StringList::new(
+        &model
+            .profile_names
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>(),
+    );
+    widgets.profile_dropdown.set_model(Some(&string_list));
+    widgets
+        .profile_dropdown
+        .set_selected(model.active_profile_index);
+}
+
+fn handle_profiles_event(
+    model: &mut AppModel,
+    widgets: &AppModelWidgets,
+    root: &adw::ApplicationWindow,
+    sender: ComponentSender<AppModel>,
+    ev: ui_profiles::ProfilePageEvent,
+) {
+    use ui_profiles::ProfilePageEvent;
+    let emit = profiles_emit(&sender);
+
+    match ev {
+        ProfilePageEvent::Select(id) => {
+            model.selected_profile_id = Some(id);
+            refresh_profiles_page(widgets, model, &sender);
+        }
+        ProfilePageEvent::New => {
+            let Some(name) = ui_profiles::ask_text(
+                root,
+                "New scoring profile",
+                "Name",
+                "My scoring profile",
+            ) else {
+                return;
+            };
+            match model.store.create_new(&name) {
+                Ok(created) => {
+                    model.selected_profile_id = Some(created.id.clone());
+                    model.rebuild_profile_lists();
+                    sync_profile_dropdown(widgets, model);
+                    model.profiles_status =
+                        format!("Created “{}” — opening editor.", created.name);
+                    // Enter editor immediately.
+                    if let Some(profile) = model.store.get(&created.id).cloned() {
+                        model.editing_profile = true;
+                        model.profile_editor = Some(ui_profiles::mount_profile_editor(
+                            &widgets.profiles_editor_body,
+                            &widgets.profiles_editor_footer,
+                            profile,
+                            &emit,
+                        ));
+                    }
+                    refresh_profiles_page(widgets, model, &sender);
+                }
+                Err(e) => model.profiles_status = e,
+            }
+        }
+        ProfilePageEvent::SetActive => {
+            let Some(id) = model.selected_profile_id.clone() else {
+                model.profiles_status = "Select a profile first.".into();
+                return;
+            };
+            match model.store.set_active(&id) {
+                Ok(()) => {
+                    model.rebuild_profile_lists();
+                    sync_profile_dropdown(widgets, model);
+                    model.profiles_status = format!("Active profile: {id}");
+                    refresh_profiles_page(widgets, model, &sender);
+                    if model.product.is_some() {
+                        sender.input(Msg::Rescore);
+                    }
+                }
+                Err(e) => model.profiles_status = e,
+            }
+        }
+        ProfilePageEvent::Duplicate => {
+            let Some(id) = model.selected_profile_id.clone() else {
+                model.profiles_status = "Select a profile first.".into();
+                return;
+            };
+            let default_name = format!(
+                "{} (copy)",
+                model
+                    .store
+                    .get(&id)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("Profile")
+            );
+            let Some(name) =
+                ui_profiles::ask_text(root, "Duplicate profile", "Name", &default_name)
+            else {
+                return;
+            };
+            match model.store.duplicate(&id, &name) {
+                Ok(p) => {
+                    let _ = model.store.set_active(&p.id);
+                    model.selected_profile_id = Some(p.id.clone());
+                    model.rebuild_profile_lists();
+                    sync_profile_dropdown(widgets, model);
+                    model.profiles_status = format!("Duplicated as {}", p.id);
+                    refresh_profiles_page(widgets, model, &sender);
+                }
+                Err(e) => model.profiles_status = e,
+            }
+        }
+        ProfilePageEvent::StartEdit => {
+            let Some(id) = model.selected_profile_id.clone() else {
+                model.profiles_status = "Select a profile first.".into();
+                return;
+            };
+            let Some(profile) = model.store.get(&id).cloned() else {
+                model.profiles_status = format!("Unknown profile `{id}`");
+                return;
+            };
+            model.editing_profile = true;
+            model.profile_editor = Some(ui_profiles::mount_profile_editor(
+                &widgets.profiles_editor_body,
+                &widgets.profiles_editor_footer,
+                profile,
+                &emit,
+            ));
+            model.profiles_status = "Editing — Save or Cancel below.".into();
+        }
+        ProfilePageEvent::Export => {
+            let Some(id) = model.selected_profile_id.clone() else {
+                model.profiles_status = "Select a profile first.".into();
+                return;
+            };
+            match model.store.export_json(&id) {
+                Ok(json) => {
+                    let path = model.store.root().join(format!("{id}-export.json"));
+                    match std::fs::write(&path, json) {
+                        Ok(()) => {
+                            model.profiles_status = format!("Wrote {}", path.display());
+                        }
+                        Err(e) => model.profiles_status = e.to_string(),
+                    }
+                }
+                Err(e) => model.profiles_status = e,
+            }
+        }
+        ProfilePageEvent::Import => {
+            let Some(path) = ui_profiles::ask_path(root) else {
+                return;
+            };
+            match std::fs::read_to_string(path.trim()) {
+                Ok(text) => match model.store.import_json(&text) {
+                    Ok(p) => {
+                        model.selected_profile_id = Some(p.id.clone());
+                        model.rebuild_profile_lists();
+                        sync_profile_dropdown(widgets, model);
+                        model.profiles_status = format!("Imported {}", p.id);
+                        refresh_profiles_page(widgets, model, &sender);
+                    }
+                    Err(e) => model.profiles_status = e,
+                },
+                Err(e) => model.profiles_status = e.to_string(),
+            }
+        }
+        ProfilePageEvent::Delete => {
+            let Some(id) = model.selected_profile_id.clone() else {
+                model.profiles_status = "Select a profile first.".into();
+                return;
+            };
+            match model.store.delete(&id) {
+                Ok(()) => {
+                    model.selected_profile_id = Some(model.store.active_id().to_string());
+                    model.rebuild_profile_lists();
+                    sync_profile_dropdown(widgets, model);
+                    model.profiles_status = "Removed user override / custom profile.".into();
+                    refresh_profiles_page(widgets, model, &sender);
+                }
+                Err(e) => model.profiles_status = e,
+            }
+        }
+        ProfilePageEvent::RestoreBuiltins => match model.store.restore_builtins() {
+            Ok(()) => {
+                model.selected_profile_id = Some(model.store.active_id().to_string());
+                model.rebuild_profile_lists();
+                sync_profile_dropdown(widgets, model);
+                model.profiles_status =
+                    "Built-in profiles restored from embedded defaults (user customs kept)."
+                        .into();
+                refresh_profiles_page(widgets, model, &sender);
+            }
+            Err(e) => model.profiles_status = e,
+        },
+        ProfilePageEvent::CancelEdit => {
+            model.editing_profile = false;
+            model.profile_editor = None;
+            ui_profiles::clear_editor(
+                &widgets.profiles_editor_body,
+                &widgets.profiles_editor_footer,
+            );
+            model.profiles_status = "Edit cancelled.".into();
+            refresh_profiles_page(widgets, model, &sender);
+        }
+        ProfilePageEvent::SaveEdit => {
+            let Some(editor) = model.profile_editor.as_ref() else {
+                model.profiles_status = "No editor open.".into();
+                return;
+            };
+            match editor.collect() {
+                Ok(profile) => {
+                    let id = profile.id.clone();
+                    match model.store.save(profile) {
+                        Ok(()) => {
+                            let _ = model.store.set_active(&id);
+                            model.selected_profile_id = Some(id.clone());
+                            model.rebuild_profile_lists();
+                            sync_profile_dropdown(widgets, model);
+                            model.editing_profile = false;
+                            model.profile_editor = None;
+                            ui_profiles::clear_editor(
+                                &widgets.profiles_editor_body,
+                                &widgets.profiles_editor_footer,
+                            );
+                            model.profiles_status = format!("Saved `{id}`.");
+                            refresh_profiles_page(widgets, model, &sender);
+                            if model.product.is_some() {
+                                sender.input(Msg::Rescore);
+                            }
+                        }
+                        Err(e) => model.profiles_status = e,
+                    }
+                }
+                Err(e) => model.profiles_status = e,
+            }
+        }
     }
 }
 
@@ -556,6 +825,14 @@ impl Component for AppModel {
                                 sender.input(Msg::ShowPage(AppPage::Favorites));
                             },
                         },
+                        gtk::Button {
+                            set_label: "Profiles",
+                            #[watch]
+                            set_css_classes: &model.nav_classes(AppPage::Profiles),
+                            connect_clicked[sender] => move |_| {
+                                sender.input(Msg::ShowPage(AppPage::Profiles));
+                            },
+                        },
                     },
 
                     #[wrap(Some)]
@@ -697,10 +974,10 @@ impl Component for AppModel {
                             },
 
                             gtk::Button {
-                                set_label: "Manage profiles…",
+                                set_label: "Profiles",
                                 set_valign: gtk::Align::Center,
                                 connect_clicked[sender] => move |_| {
-                                    sender.input(Msg::ManageProfiles);
+                                    sender.input(Msg::OpenProfilesPage);
                                 },
                             },
                             gtk::Button {
@@ -1057,6 +1334,120 @@ impl Component for AppModel {
                         },
                     },
                 },
+
+                // —— Profiles page (list) ——
+                gtk::Box {
+                    set_orientation: gtk::Orientation::Vertical,
+                    set_vexpand: true,
+                    set_hexpand: true,
+                    #[watch]
+                    set_visible: model.is_profiles_list(),
+
+                    gtk::ScrolledWindow {
+                        set_vexpand: true,
+                        set_hexpand: true,
+                        set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
+
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 12,
+                            set_margin_top: 18,
+                            set_margin_bottom: 12,
+                            set_margin_start: 16,
+                            set_margin_end: 16,
+
+                            gtk::Label {
+                                set_label: "Profiles",
+                                add_css_class: "brand-title",
+                                set_halign: gtk::Align::Start,
+                                set_xalign: 0.0,
+                            },
+                            gtk::Label {
+                                set_label: "Declarative JSON scoring profiles — not medical advice. Select one, then Edit on this page.",
+                                add_css_class: "dim-label",
+                                set_halign: gtk::Align::Start,
+                                set_wrap: true,
+                                set_wrap_mode: gtk::pango::WrapMode::WordChar,
+                                set_ellipsize: gtk::pango::EllipsizeMode::None,
+                                set_xalign: 0.0,
+                            },
+                            gtk::Expander {
+                                set_label: Some("How scoring works"),
+
+                                #[wrap(Some)]
+                                set_child = &gtk::Label {
+                                    set_label: crate::engine::ENGINE_NOTES.trim(),
+                                    add_css_class: "dim-label",
+                                    set_wrap: true,
+                                    set_xalign: 0.0,
+                                    set_selectable: true,
+                                },
+                            },
+                            #[name = "profiles_list"]
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 4,
+                            },
+                        },
+                    },
+
+                    gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_spacing: 8,
+                        set_margin_start: 16,
+                        set_margin_end: 16,
+                        set_margin_bottom: 16,
+                        add_css_class: "profiles-actions-bar",
+
+                        #[name = "profiles_actions"]
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 8,
+                        },
+                        gtk::Label {
+                            #[watch]
+                            set_label: &model.profiles_status,
+                            add_css_class: "dim-label",
+                            set_halign: gtk::Align::Start,
+                            set_wrap: true,
+                            set_xalign: 0.0,
+                        },
+                    },
+                },
+
+                // —— Profiles page (editor) ——
+                gtk::Box {
+                    set_orientation: gtk::Orientation::Vertical,
+                    set_vexpand: true,
+                    set_hexpand: true,
+                    #[watch]
+                    set_visible: model.is_profiles_editor(),
+
+                    gtk::ScrolledWindow {
+                        set_vexpand: true,
+                        set_hexpand: true,
+                        set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
+
+                        #[name = "profiles_editor_body"]
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 12,
+                            set_margin_top: 12,
+                            set_margin_bottom: 8,
+                            set_margin_start: 14,
+                            set_margin_end: 14,
+                        },
+                    },
+
+                    #[name = "profiles_editor_footer"]
+                    gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_spacing: 8,
+                        set_margin_start: 14,
+                        set_margin_end: 14,
+                        set_margin_bottom: 12,
+                    },
+                },
             },
         }
     }
@@ -1114,14 +1505,37 @@ impl Component for AppModel {
                 let _ = std::fs::create_dir_all(&dir);
                 FavoritesStore::open(dir.join("favorites.json"))
             }),
+            selected_profile_id: None,
+            profiles_status: "Select a profile, then Edit — editor opens full-page.".into(),
+            editing_profile: false,
+            profile_editor: None,
         };
         model.rebuild_profile_lists();
+        model.selected_profile_id = Some(model.store.active_id().to_string());
 
         let widgets = view_output!();
         load_css();
         logo::apply_window_icon(&root);
+        if let (Ok(w), Ok(h)) = (
+            std::env::var("LIBREFOOD_WIDTH"),
+            std::env::var("LIBREFOOD_HEIGHT"),
+        ) {
+            if let (Ok(w), Ok(h)) = (w.parse::<i32>(), h.parse::<i32>()) {
+                root.set_default_size(w, h);
+            }
+        }
         rebuild_history_list(&widgets.history_list, model.history.entries(), &sender);
         rebuild_favorites_list(&widgets.favorites_list, model.favorites.entries(), &sender);
+        refresh_profiles_page(&widgets, &model, &sender);
+        if model.page == AppPage::Profiles {
+            if std::env::var("LIBREFOOD_EDIT_PROFILE").ok().as_deref() == Some("1") {
+                // Defer: open editor after first frame for screenshots.
+                let sender2 = sender.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    sender2.input(Msg::Profiles(ui_profiles::ProfilePageEvent::StartEdit));
+                });
+            }
+        }
 
         // Populate profile dropdown model
         let string_list = gtk::StringList::new(
@@ -1154,6 +1568,32 @@ impl Component for AppModel {
             gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
                 sender_l.input(Msg::Lookup);
             });
+        }
+
+        // Optional headless-ish screenshot for docs (LIBREFOOD_SCREENSHOT=/path.png).
+        if let Ok(path) = std::env::var("LIBREFOOD_SCREENSHOT") {
+            let delay_ms: u64 = std::env::var("LIBREFOOD_SCREENSHOT_DELAY_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(900);
+            let win = root.clone();
+            gtk::glib::timeout_add_local_once(
+                std::time::Duration::from_millis(delay_ms),
+                move || {
+                    let paintable = gtk::WidgetPaintable::new(Some(&win));
+                    let img = gdk::prelude::PaintableExt::current_image(&paintable);
+                    if let Ok(tex) = img.downcast::<gdk::Texture>() {
+                        if let Err(e) = tex.save_to_png(&path) {
+                            eprintln!("screenshot save failed: {e}");
+                        } else {
+                            eprintln!("screenshot wrote {path}");
+                        }
+                    } else {
+                        eprintln!("screenshot: widget had no texture yet");
+                    }
+                    std::process::exit(0);
+                },
+            );
         }
 
         ComponentParts { model, widgets }
@@ -1289,30 +1729,14 @@ impl Component for AppModel {
                     }
                 }
             }
-            Msg::ManageProfiles => {
-                let result = ui_profiles::run_manage_dialog(root, &mut self.store);
-                self.rebuild_profile_lists();
-                let string_list = gtk::StringList::new(
-                    &self
-                        .profile_names
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>(),
-                );
-                widgets.profile_dropdown.set_model(Some(&string_list));
-                widgets
-                    .profile_dropdown
-                    .set_selected(self.active_profile_index);
-                if result.store_changed || result.active_id != self.store.active_id() {
-                    let _ = self.store.set_active(&result.active_id);
-                    self.rebuild_profile_lists();
-                    widgets
-                        .profile_dropdown
-                        .set_selected(self.active_profile_index);
-                }
-                if self.product.is_some() {
-                    sender.input(Msg::Rescore);
-                }
+            Msg::OpenProfilesPage => {
+                self.editing_profile = false;
+                self.profile_editor = None;
+                ui_profiles::clear_editor(&widgets.profiles_editor_body, &widgets.profiles_editor_footer);
+                sender.input(Msg::ShowPage(AppPage::Profiles));
+            }
+            Msg::Profiles(ev) => {
+                handle_profiles_event(self, widgets, root, sender.clone(), ev);
             }
             Msg::Rescore => {
                 self.rescore();
@@ -1353,6 +1777,14 @@ impl Component for AppModel {
                 self.status_text = "Compared all profiles on the current product.".into();
             }
             Msg::ShowPage(page) => {
+                if page != AppPage::Profiles {
+                    self.editing_profile = false;
+                    self.profile_editor = None;
+                    ui_profiles::clear_editor(
+                        &widgets.profiles_editor_body,
+                        &widgets.profiles_editor_footer,
+                    );
+                }
                 self.page = page;
                 if page == AppPage::History {
                     rebuild_history_list(
@@ -1366,6 +1798,11 @@ impl Component for AppModel {
                         self.favorites.entries(),
                         &sender,
                     );
+                } else if page == AppPage::Profiles {
+                    if self.selected_profile_id.is_none() {
+                        self.selected_profile_id = Some(self.store.active_id().to_string());
+                    }
+                    refresh_profiles_page(widgets, self, &sender);
                 }
             }
             Msg::ToggleFavorite => {
@@ -1649,6 +2086,32 @@ fn load_css() {
         .library-row {
             padding: 6px 0;
             border-bottom: 1px solid alpha(@card_fg_color, 0.08);
+        }
+        .profile-row {
+            padding: 8px 4px;
+        }
+        .profile-row-title { font-weight: 650; }
+        .profile-row-selected {
+            background: alpha(@accent_bg_color, 0.18);
+            border-radius: 8px;
+        }
+        .profiles-actions-bar {
+            padding-top: 8px;
+            border-top: 1px solid alpha(@card_fg_color, 0.1);
+        }
+        .profiles-editor-footer {
+            padding-top: 8px;
+            border-top: 1px solid alpha(@card_fg_color, 0.12);
+            background: @window_bg_color;
+        }
+        .criterion-card {
+            margin-bottom: 4px;
+        }
+        .field-label {
+            font-size: 0.85rem;
+            font-weight: 600;
+            opacity: 0.8;
+            margin-top: 2px;
         }
         "#,
     );

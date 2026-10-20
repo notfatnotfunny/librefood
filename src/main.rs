@@ -15,7 +15,7 @@ use relm4::prelude::*;
 fn main() {
     // Optional launch flags (stripped before GApplication):
     //   librefood --barcode 3017620422003
-    //   librefood --page history|favorites|lookup
+    //   librefood --page history|favorites|lookup|profiles
     //   LIBREFOOD_BARCODE=… / LIBREFOOD_PAGE=…
     let mut argv: Vec<String> = std::env::args().collect();
     let mut initial_barcode = std::env::var("LIBREFOOD_BARCODE").ok();
@@ -41,6 +41,7 @@ fn main() {
     {
         Some("history") => AppPage::History,
         Some("favorites") | Some("favourite") | Some("favourites") => AppPage::Favorites,
+        Some("profiles") | Some("profile") => AppPage::Profiles,
         _ => AppPage::Lookup,
     };
 

@@ -1556,7 +1556,8 @@ impl Component for AppModel {
             last_result: None,
             product_image: None,
             logo: logo::logo_texture(128),
-            camera_probe: camera::camera_probe(),
+            // Quick list only — full open is deferred (avoids init hang / D-Bus lock).
+            camera_probe: camera::camera_probe_quick(),
             scanning: false,
             preview: None,
             scan_stop: None,

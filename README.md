@@ -87,10 +87,12 @@ sudo pacman -S libcamera gst-plugin-libcamera pipewire
 | `LIBREFOOD_CAMERA_NAME=…` | Exact libcamera id (`cam --list` id in parentheses) |
 | `LIBREFOOD_CAMERA_INDEX=0` | Among matching facing cams, pick Nth (0 = primary rear) |
 
-On fajita (multiple cams), default is **back**. List ids with `cam --list`, then e.g. second rear:
+On fajita (multiple cams), default is **back** (libcamera `Location`, not `/dev/video0`). During scan, **Switch camera** cycles cameras (Snapshot-style); the last choice is saved in `~/.config/librefood/camera-id`.
 
 ```bash
-LIBREFOOD_CAMERA_FACING=back LIBREFOOD_CAMERA_INDEX=1 LIBREFOOD_CAMERA_DEBUG=1 ./target/release/librefood
+cam --list
+LIBREFOOD_CAMERA_DEBUG=1 ./target/release/librefood
+# second rear: LIBREFOOD_CAMERA_FACING=back LIBREFOOD_CAMERA_INDEX=1
 # or: LIBREFOOD_CAMERA_NAME='/base/soc@0/…'
 ```
 

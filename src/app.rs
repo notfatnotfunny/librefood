@@ -13,7 +13,7 @@ use adw::prelude::AdwApplicationWindowExt;
 use gtk::gdk;
 use gtk::prelude::*;
 use relm4::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 
@@ -34,6 +34,8 @@ pub enum Msg {
     },
     ScanDone(Result<String, String>),
     CancelScan,
+    /// Snapshot-style: cycle to the next libcamera while preview is open.
+    SwitchCamera,
     WidthChanged(i32),
     ProfileSelected(u32),
     OpenProfilesPage,
@@ -104,7 +106,11 @@ pub struct AppModel {
     camera_probe: camera::CameraProbe,
     scanning: bool,
     preview: Option<gdk::Texture>,
-    scan_stop: Option<Arc<AtomicBool>>,
+    scan_control: Option<camera::LiveScanControl>,
+    /// True when libcamera enumeration found more than one device.
+    scan_can_switch: bool,
+    /// Active camera label shown during scan (`Back · imx519`).
+    scan_camera_label: String,
     width_class: UiWidth,
     store: ProfileStore,
     profile_names: Vec<String>,
@@ -1105,13 +1111,40 @@ impl Component for AppModel {
                                 },
                             },
 
-                            gtk::Button {
-                                set_label: "Cancel scan",
-                                add_css_class: "destructive-action",
-                                set_hexpand: true,
-                                connect_clicked[sender] => move |_| {
-                                    sender.input(Msg::CancelScan);
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Horizontal,
+                                set_spacing: 6,
+                                set_homogeneous: true,
+
+                                gtk::Button {
+                                    set_label: "Switch camera",
+                                    set_hexpand: true,
+                                    #[watch]
+                                    set_visible: model.scan_can_switch,
+                                    #[watch]
+                                    set_tooltip_text: Some(model.scan_camera_label.as_str()),
+                                    connect_clicked[sender] => move |_| {
+                                        sender.input(Msg::SwitchCamera);
+                                    },
                                 },
+                                gtk::Button {
+                                    set_label: "Cancel scan",
+                                    add_css_class: "destructive-action",
+                                    set_hexpand: true,
+                                    connect_clicked[sender] => move |_| {
+                                        sender.input(Msg::CancelScan);
+                                    },
+                                },
+                            },
+
+                            gtk::Label {
+                                #[watch]
+                                set_label: &model.scan_camera_label,
+                                add_css_class: "dim-label",
+                                set_halign: gtk::Align::Center,
+                                set_wrap: true,
+                                #[watch]
+                                set_visible: model.scanning && !model.scan_camera_label.is_empty(),
                             },
                         },
 
@@ -1594,7 +1627,9 @@ impl Component for AppModel {
             camera_probe: camera::camera_probe_quick(),
             scanning: false,
             preview: None,
-            scan_stop: None,
+            scan_control: None,
+            scan_can_switch: false,
+            scan_camera_label: String::new(),
             width_class: UiWidth::Compact,
             store,
             profile_names: vec![],
@@ -2015,8 +2050,12 @@ impl Component for AppModel {
                         self.status_kind = StatusKind::Error;
                         self.status_text = self.camera_probe.unavailable_message();
                     } else {
-                        let stop = Arc::new(AtomicBool::new(false));
-                        self.scan_stop = Some(Arc::clone(&stop));
+                        let control = camera::LiveScanControl::new();
+                        // Pre-enumerate so the switch button can appear immediately on phones.
+                        let cams = camera::list_cameras();
+                        self.scan_can_switch = cams.len() > 1;
+                        self.scan_camera_label = String::new();
+                        self.scan_control = Some(control.clone());
                         self.scanning = true;
                         self.preview = None;
                         self.status_kind = StatusKind::Loading;
@@ -2026,9 +2065,10 @@ impl Component for AppModel {
                         self.product_image = None;
                         clear_lists(widgets);
                         let sender2 = sender.clone();
+                        let stop = Arc::clone(&control.stop);
                         thread::spawn(move || {
                             let result =
-                                camera::scan_barcode_live(300, Arc::clone(&stop), |w, h, rgb| {
+                                camera::scan_barcode_live(300, control, |w, h, rgb| {
                                     if !stop.load(Ordering::Relaxed) {
                                         sender2.input(Msg::PreviewFrame {
                                             width: w,
@@ -2045,6 +2085,14 @@ impl Component for AppModel {
             }
             Msg::PreviewFrame { width, height, rgb } => {
                 if self.scanning {
+                    if let Some(ctrl) = &self.scan_control {
+                        self.scan_can_switch = ctrl.can_switch.load(Ordering::Relaxed);
+                        if let Ok(label) = ctrl.label.lock() {
+                            if !label.is_empty() && *label != self.scan_camera_label {
+                                self.scan_camera_label = label.clone();
+                            }
+                        }
+                    }
                     let stride = (width as usize).saturating_mul(3);
                     let needed = stride.saturating_mul(height as usize);
                     if width > 0 && height > 0 && stride > 0 && rgb.len() >= needed {
@@ -2059,22 +2107,36 @@ impl Component for AppModel {
                         );
                         self.preview = Some(texture.upcast());
                         if first {
-                            self.status_text =
-                                "Live preview on — center the barcode in the guide.".into();
+                            let cam = if self.scan_camera_label.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({})", self.scan_camera_label)
+                            };
+                            self.status_text = format!(
+                                "Live preview{cam} — center the barcode in the guide."
+                            );
                         }
                     }
                 }
             }
+            Msg::SwitchCamera => {
+                if let Some(ctrl) = &self.scan_control {
+                    ctrl.request_cycle();
+                    self.status_text = "Switching camera…".into();
+                }
+            }
             Msg::CancelScan => {
-                if let Some(stop) = &self.scan_stop {
-                    stop.store(true, Ordering::SeqCst);
+                if let Some(ctrl) = &self.scan_control {
+                    ctrl.stop.store(true, Ordering::SeqCst);
                 }
                 self.status_text = "Cancelling scan…".into();
             }
             Msg::ScanDone(result) => {
                 self.scanning = false;
                 self.preview = None;
-                self.scan_stop = None;
+                self.scan_control = None;
+                self.scan_can_switch = false;
+                self.scan_camera_label.clear();
                 match result {
                     Ok(code) => {
                         self.barcode = off::normalize_barcode(&code);

@@ -13,7 +13,7 @@ use rxing::{helpers::detect_in_luma, BarcodeFormat};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use v4l::buffer::Type as BufType;
@@ -1109,10 +1109,40 @@ fn shrink_for_preview(width: u32, height: u32, rgb: &[u8], max_edge: u32) -> (u3
     (nw, nh, out)
 }
 
+/// Shared knobs for a live scan (Snapshot-style camera flip).
+#[derive(Clone)]
+pub struct LiveScanControl {
+    pub stop: Arc<AtomicBool>,
+    /// Set true to cycle to the next libcamera (cleared by the scan loop).
+    pub cycle: Arc<AtomicBool>,
+    /// Human label of the active camera (`Back · imx519`).
+    pub label: Arc<Mutex<String>>,
+    /// True when more than one libcamera exists (UI can show switch).
+    pub can_switch: Arc<AtomicBool>,
+}
+
+impl LiveScanControl {
+    pub fn new() -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            cycle: Arc::new(AtomicBool::new(false)),
+            label: Arc::new(Mutex::new(String::new())),
+            can_switch: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn request_cycle(&self) {
+        self.cycle.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Re-export libcamera enumeration for the UI.
+pub use crate::gst_cam::list_cameras;
+
 /// Continuous capture with optional live RGB preview callbacks.
 pub fn scan_barcode_live<F>(
     max_frames: u32,
-    stop: Arc<AtomicBool>,
+    control: LiveScanControl,
     mut on_frame: F,
 ) -> Result<String, CameraError>
 where
@@ -1122,10 +1152,21 @@ where
         .unwrap_or_else(|_| "auto".into())
         .to_ascii_lowercase();
     let camss = detect_camss_system();
+    let cams = crate::gst_cam::list_cameras();
+    control
+        .can_switch
+        .store(cams.len() > 1, Ordering::SeqCst);
     cam_debug(format!(
-        "scan backend={backend} camss={camss} gst_avail={}",
-        crate::gst_cam::gst_camera_available()
+        "scan backend={backend} camss={camss} gst_avail={} cameras={}",
+        crate::gst_cam::gst_camera_available(),
+        cams.len()
     ));
+    for c in &cams {
+        cam_debug(format!(
+            "  cam id={:?} facing={} label={:?}",
+            c.id, c.facing, c.label
+        ));
+    }
 
     let try_gst_first = matches!(
         backend.as_str(),
@@ -1133,7 +1174,7 @@ where
     ) || (backend == "auto" && camss);
 
     if try_gst_first {
-        match scan_gst_live(max_frames, Arc::clone(&stop), &mut on_frame) {
+        match scan_gst_live(max_frames, &control, &mut on_frame) {
             Ok(code) => return Ok(code),
             Err(e) => {
                 cam_debug(format!("gst scan failed: {e}"));
@@ -1151,14 +1192,14 @@ where
         backend.as_str(),
         "libcamera" | "gst" | "gstreamer" | "pipewire" | "pw"
     ) {
-        match scan_v4l2_live(max_frames, Arc::clone(&stop), &mut on_frame) {
+        match scan_v4l2_live(max_frames, Arc::clone(&control.stop), &mut on_frame) {
             Ok(code) => return Ok(code),
             Err(e) => {
                 let msg = e.to_string();
                 cam_debug(format!("v4l2 scan failed: {msg}"));
                 if is_v4l_pipeline_dead(&msg) || camss {
                     cam_debug("falling back to GStreamer/libcamera");
-                    return scan_gst_live(max_frames, stop, &mut on_frame).map_err(|ge| {
+                    return scan_gst_live(max_frames, &control, &mut on_frame).map_err(|ge| {
                         CameraError::Open(format!(
                             "V4L2 failed ({msg}); libcamera/GStreamer also failed ({ge}). \
                              On Alpine: apk add libcamera gst-plugins-base gst-plugin-libcamera \
@@ -1171,24 +1212,72 @@ where
         }
     }
 
-    scan_gst_live(max_frames, stop, &mut on_frame)
+    scan_gst_live(max_frames, &control, &mut on_frame)
 }
 
 fn scan_gst_live<F>(
     max_frames: u32,
-    stop: Arc<AtomicBool>,
+    control: &LiveScanControl,
     on_frame: &mut F,
 ) -> Result<String, CameraError>
 where
     F: FnMut(u32, u32, Vec<u8>),
 {
+    let cameras = crate::gst_cam::list_cameras();
+    control
+        .can_switch
+        .store(cameras.len() > 1, Ordering::SeqCst);
+
     let mut cam = crate::gst_cam::GstCamera::open().map_err(CameraError::Open)?;
-    cam_debug(format!("scanning via gst ({})", cam.source_label()));
+    let mut current_id = cam.camera_name().map(str::to_string);
+    {
+        let label = cam.camera_label();
+        if let Ok(mut g) = control.label.lock() {
+            *g = label.clone();
+        }
+        cam_debug(format!(
+            "scanning via gst ({}) camera={:?} label={label}",
+            cam.source_label(),
+            current_id
+        ));
+    }
+
     let mut last_err = CameraError::NoBarcode;
     for i in 0..max_frames {
-        if stop.load(Ordering::Relaxed) {
+        if control.stop.load(Ordering::Relaxed) {
             return Err(CameraError::Cancelled);
         }
+
+        // Snapshot-style flip: cycle to the next enumerated libcamera.
+        if control.cycle.swap(false, Ordering::SeqCst) && cameras.len() > 1 {
+            let cur = current_id.as_deref();
+            let pos = cameras
+                .iter()
+                .position(|c| Some(c.id.as_str()) == cur)
+                .unwrap_or(0);
+            let next = &cameras[(pos + 1) % cameras.len()];
+            cam_debug(format!(
+                "switching camera {} -> {} ({})",
+                cur.unwrap_or("?"),
+                next.id,
+                next.label
+            ));
+            match crate::gst_cam::GstCamera::open_named(Some(&next.id)) {
+                Ok(new_cam) => {
+                    cam = new_cam;
+                    current_id = Some(next.id.clone());
+                    crate::gst_cam::save_camera_id(&next.id);
+                    if let Ok(mut g) = control.label.lock() {
+                        *g = next.label.clone();
+                    }
+                }
+                Err(e) => {
+                    cam_debug(format!("switch failed: {e}"));
+                    last_err = CameraError::Open(format!("switch camera: {e}"));
+                }
+            }
+        }
+
         let (width, height, rgb) =
             match cam.next_rgb(gstreamer::ClockTime::from_mseconds(500)) {
                 Ok(v) => v,
@@ -1205,7 +1294,7 @@ where
             return Ok(code);
         }
     }
-    if stop.load(Ordering::Relaxed) {
+    if control.stop.load(Ordering::Relaxed) {
         Err(CameraError::Cancelled)
     } else {
         Err(last_err)

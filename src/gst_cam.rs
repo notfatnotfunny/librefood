@@ -170,25 +170,154 @@ fn facing_from_text(s: &str) -> Option<CameraFacing> {
 }
 
 fn facing_from_location_prop(props: &gst::StructureRef) -> Option<CameraFacing> {
-    // libcamera provider stores enums as strings: "Front" / "Back" / "External"
-    // (or "CameraLocationFront" …). Integer 0/1/2 is a fallback.
-    if let Ok(Some(s)) = props.get_optional::<&str>("api.libcamera.Location") {
-        return facing_from_text(s).or_else(|| match s {
-            "0" => Some(CameraFacing::Front),
-            "1" => Some(CameraFacing::Back),
-            "2" => Some(CameraFacing::External),
-            _ => None,
-        });
-    }
-    if let Ok(Some(v)) = props.get_optional::<i32>("api.libcamera.Location") {
-        return match v {
-            0 => Some(CameraFacing::Front),
-            1 => Some(CameraFacing::Back),
-            2 => Some(CameraFacing::External),
-            _ => None,
-        };
+    // Snapshot reads "api.libcamera.location"; libcamera GStreamer plugin uses
+    // "api.libcamera." + ControlId::name() → usually "Location".
+    for key in [
+        "api.libcamera.Location",
+        "api.libcamera.location",
+    ] {
+        if let Ok(Some(s)) = props.get_optional::<&str>(key) {
+            return facing_from_text(s).or_else(|| match s {
+                "0" => Some(CameraFacing::Front),
+                "1" => Some(CameraFacing::Back),
+                "2" => Some(CameraFacing::External),
+                _ => None,
+            });
+        }
+        if let Ok(Some(v)) = props.get_optional::<i32>(key) {
+            return match v {
+                0 => Some(CameraFacing::Front),
+                1 => Some(CameraFacing::Back),
+                2 => Some(CameraFacing::External),
+                _ => None,
+            };
+        }
     }
     None
+}
+
+fn sensor_from_id(id: &str) -> Option<String> {
+    let lower = id.to_ascii_lowercase();
+    for token in lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+    {
+        if token.starts_with("imx")
+            || token.starts_with("ov")
+            || token.starts_with("s5k")
+            || token.starts_with("hi")
+            || token.starts_with("gc")
+        {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+fn friendly_label(facing: CameraFacing, id: &str, display: &str) -> String {
+    let facing_word = match facing {
+        CameraFacing::Front => "Front",
+        CameraFacing::Back => "Back",
+        CameraFacing::External => "External",
+        CameraFacing::Unknown => "Camera",
+    };
+    if let Some(sensor) = sensor_from_id(id).or_else(|| sensor_from_id(display)) {
+        format!("{facing_word} · {sensor}")
+    } else if display != id
+        && !display.is_empty()
+        && facing_from_text(display).is_some()
+    {
+        // e.g. "Internal back camera"
+        display.to_string()
+    } else {
+        facing_word.to_string()
+    }
+}
+
+fn config_dir() -> Option<std::path::PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return Some(std::path::PathBuf::from(xdg).join("librefood"));
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".config/librefood"))
+}
+
+fn saved_camera_path() -> Option<std::path::PathBuf> {
+    config_dir().map(|d| d.join("camera-id"))
+}
+
+/// Last camera id chosen by the user (or auto-selected).
+pub fn load_saved_camera_id() -> Option<String> {
+    let path = saved_camera_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let id = text.trim().to_string();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+pub fn save_camera_id(id: &str) {
+    let Some(path) = saved_camera_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, format!("{id}\n")) {
+        cam_debug(format!("save camera-id failed: {e}"));
+    } else {
+        cam_debug(format!("saved camera-id={id}"));
+    }
+}
+
+/// Public camera descriptor for UI / debug.
+#[derive(Debug, Clone)]
+pub struct CameraInfo {
+    pub id: String,
+    pub label: String,
+    pub facing: &'static str,
+}
+
+impl CameraInfo {
+    fn from_candidate(c: &CamCandidate) -> Self {
+        Self {
+            id: c.id.clone(),
+            label: friendly_label(c.facing, &c.id, &c.display),
+            facing: c.facing.label(),
+        }
+    }
+}
+
+/// Enumerate libcamera cameras with human labels (Back · imx519, …).
+pub fn list_cameras() -> Vec<CameraInfo> {
+    if ensure_gst().is_err() {
+        return Vec::new();
+    }
+    let cams = list_libcamera_candidates();
+    let mut out: Vec<CameraInfo> = cams.iter().map(CameraInfo::from_candidate).collect();
+    // Stable order: back first, then by area desc, then id.
+    let pref = CameraFacingPref::Back;
+    out.sort_by(|a, b| {
+        let fa = cams.iter().find(|c| c.id == a.id).map(|c| c.facing.score(pref)).unwrap_or(0);
+        let fb = cams.iter().find(|c| c.id == b.id).map(|c| c.facing.score(pref)).unwrap_or(0);
+        fb.cmp(&fa)
+            .then_with(|| {
+                let aa = cams.iter().find(|c| c.id == a.id).map(|c| c.max_area).unwrap_or(0);
+                let ab = cams.iter().find(|c| c.id == b.id).map(|c| c.max_area).unwrap_or(0);
+                ab.cmp(&aa)
+            })
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    for c in &out {
+        cam_debug(format!(
+            "listed camera id={:?} facing={} label={:?}",
+            c.id, c.facing, c.label
+        ));
+    }
+    out
 }
 
 fn max_area_from_caps(caps: &gst::Caps) -> u64 {
@@ -379,8 +508,9 @@ fn camera_index_override() -> Option<usize> {
         .and_then(|s| s.parse::<usize>().ok())
 }
 
-/// Resolve libcamerasrc `camera-name` (prefer back by default).
-fn resolve_libcamera_name() -> Option<String> {
+/// Resolve libcamerasrc `camera-name`.
+/// Order: env NAME → env INDEX (within facing) → saved id → facing preference (default back).
+pub fn resolve_libcamera_name() -> Option<String> {
     if let Ok(name) = std::env::var("LIBREFOOD_CAMERA_NAME") {
         let name = name.trim().to_string();
         if !name.is_empty() {
@@ -398,11 +528,12 @@ fn resolve_libcamera_name() -> Option<String> {
 
     for c in &cams {
         cam_debug(format!(
-            "candidate id={:?} facing={} area={} display={:?}",
+            "candidate id={:?} facing={} area={} display={:?} label={:?}",
             c.id,
             c.facing.label(),
             c.max_area,
-            c.display
+            c.display,
+            friendly_label(c.facing, &c.id, &c.display)
         ));
     }
 
@@ -429,18 +560,44 @@ fn resolve_libcamera_name() -> Option<String> {
         matching
     };
 
-    let idx = camera_index_override().unwrap_or(0);
-    let chosen = pool.get(idx).copied().or_else(|| pool.first().copied())?;
+    if let Some(idx) = camera_index_override() {
+        let chosen = pool.get(idx).copied().or_else(|| pool.first().copied())?;
+        cam_debug(format!(
+            "selected via INDEX={idx} id={:?} facing={} label={:?}",
+            chosen.id,
+            chosen.facing.label(),
+            friendly_label(chosen.facing, &chosen.id, &chosen.display)
+        ));
+        return Some(chosen.id.clone());
+    }
+
+    if let Some(saved) = load_saved_camera_id() {
+        if let Some(c) = cams.iter().find(|c| c.id == saved) {
+            cam_debug(format!(
+                "selected saved id={:?} facing={} label={:?}",
+                c.id,
+                c.facing.label(),
+                friendly_label(c.facing, &c.id, &c.display)
+            ));
+            return Some(c.id.clone());
+        }
+        cam_debug(format!("saved camera-id {saved:?} not in list; ignoring"));
+    }
+
+    let chosen = pool.first().copied()?;
     cam_debug(format!(
-        "selected libcamera id={:?} facing={} display={:?} (pref={pref:?} index={idx})",
+        "selected libcamera id={:?} facing={} label={:?} (pref={pref:?})",
         chosen.id,
         chosen.facing.label(),
-        chosen.display
+        friendly_label(chosen.facing, &chosen.id, &chosen.display)
     ));
     Some(chosen.id.clone())
 }
 
-fn build_pipeline(src: GstSource) -> Result<(gst::Pipeline, gst_app::AppSink), String> {
+fn build_pipeline(
+    src: GstSource,
+    camera_name: Option<&str>,
+) -> Result<(gst::Pipeline, gst_app::AppSink, Option<String>), String> {
     // RGB appsink — videoconvert handles UYVY/NV12/etc from libcamera.
     let desc = format!(
         "{} name=cam ! videoconvert ! video/x-raw,format=RGB ! \
@@ -453,11 +610,16 @@ fn build_pipeline(src: GstSource) -> Result<(gst::Pipeline, gst_app::AppSink), S
         .downcast::<gst::Pipeline>()
         .map_err(|_| format!("{}: not a pipeline", src.label()))?;
 
+    let mut applied = None;
     if matches!(src, GstSource::LibCamera) {
-        if let Some(name) = resolve_libcamera_name() {
+        let name = camera_name
+            .map(|s| s.to_string())
+            .or_else(resolve_libcamera_name);
+        if let Some(name) = name {
             if let Some(el) = pipeline.by_name("cam") {
                 el.set_property_from_str("camera-name", &name);
                 cam_debug(format!("set libcamerasrc camera-name={name}"));
+                applied = Some(name);
             }
         }
     }
@@ -468,7 +630,7 @@ fn build_pipeline(src: GstSource) -> Result<(gst::Pipeline, gst_app::AppSink), S
         .downcast::<gst_app::AppSink>()
         .map_err(|_| "appsink cast failed".to_string())?;
 
-    Ok((pipeline, sink))
+    Ok((pipeline, sink, applied))
 }
 
 /// Open a GStreamer camera pipeline and pull RGB frames.
@@ -476,10 +638,16 @@ pub struct GstCamera {
     pipeline: gst::Pipeline,
     sink: gst_app::AppSink,
     source: GstSource,
+    camera_name: Option<String>,
 }
 
 impl GstCamera {
     pub fn open() -> Result<Self, String> {
+        Self::open_named(None)
+    }
+
+    /// Open with an explicit libcamera id (`camera-name`), or auto-select when `None`.
+    pub fn open_named(camera_name: Option<&str>) -> Result<Self, String> {
         ensure_gst()?;
         let sources = candidate_sources();
         if sources.is_empty() {
@@ -492,9 +660,13 @@ impl GstCamera {
         }
         let mut last = String::new();
         for src in sources {
-            match Self::open_source(src) {
+            match Self::open_source(src, camera_name) {
                 Ok(cam) => {
-                    cam_debug(format!("gst open OK via {}", src.label()));
+                    cam_debug(format!(
+                        "gst open OK via {} name={:?}",
+                        cam.source.label(),
+                        cam.camera_name
+                    ));
                     return Ok(cam);
                 }
                 Err(e) => {
@@ -506,8 +678,8 @@ impl GstCamera {
         Err(last)
     }
 
-    fn open_source(src: GstSource) -> Result<Self, String> {
-        let (pipeline, sink) = build_pipeline(src)?;
+    fn open_source(src: GstSource, camera_name: Option<&str>) -> Result<Self, String> {
+        let (pipeline, sink, applied) = build_pipeline(src, camera_name)?;
         pipeline
             .set_state(gst::State::Playing)
             .map_err(|e| format!("set Playing: {e}"))?;
@@ -524,10 +696,14 @@ impl GstCamera {
             pipeline,
             sink,
             source: src,
+            camera_name: applied,
         };
         match cam.next_rgb(gst::ClockTime::from_seconds(5)) {
             Ok(_) => {
                 cam_debug(format!("gst first frame OK ({})", src.label()));
+                if let Some(id) = cam.camera_name.as_deref() {
+                    save_camera_id(id);
+                }
                 Ok(cam)
             }
             Err(e) => {
@@ -539,6 +715,21 @@ impl GstCamera {
 
     pub fn source_label(&self) -> &'static str {
         self.source.label()
+    }
+
+    pub fn camera_name(&self) -> Option<&str> {
+        self.camera_name.as_deref()
+    }
+
+    pub fn camera_label(&self) -> String {
+        let Some(id) = self.camera_name.as_deref() else {
+            return self.source.label().to_string();
+        };
+        list_cameras()
+            .into_iter()
+            .find(|c| c.id == id)
+            .map(|c| c.label)
+            .unwrap_or_else(|| id.to_string())
     }
 
     pub fn next_rgb(&mut self, timeout: gst::ClockTime) -> Result<(u32, u32, Vec<u8>), String> {
@@ -623,6 +814,20 @@ mod tests {
                 _ => CameraFacingPref::Back,
             },
             CameraFacingPref::Back
+        );
+    }
+
+    #[test]
+    fn sensor_and_label_from_fajita_ids() {
+        let id = "/base/soc@0/camss@acb3000/i2c@…/imx519@1a";
+        assert_eq!(sensor_from_id(id).as_deref(), Some("imx519"));
+        assert_eq!(
+            friendly_label(CameraFacing::Back, id, id),
+            "Back · imx519"
+        );
+        assert_eq!(
+            friendly_label(CameraFacing::Front, "imx371 16-0010", "front"),
+            "Front · imx371"
         );
     }
 }

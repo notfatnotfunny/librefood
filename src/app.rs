@@ -1603,13 +1603,20 @@ impl Component for AppModel {
         load_css();
         logo::apply_window_icon(&root);
         apply_window_placement(&root);
-        // Re-apply after the surface exists (Wayland/X11 often ignore maximize
-        // before the window is mapped).
+        // Wayland/Phosh often ignore fullscreen/maximize until the surface is
+        // mapped — re-apply on map and once shortly after.
         {
             let win = root.clone();
-            gtk::glib::idle_add_local_once(move || {
-                apply_window_placement(&win);
+            win.connect_map(|w| {
+                apply_window_placement(w);
             });
+            let win2 = root.clone();
+            gtk::glib::timeout_add_local_once(
+                std::time::Duration::from_millis(150),
+                move || {
+                    apply_window_placement(&win2);
+                },
+            );
         }
         rebuild_history_list(&widgets.history_list, model.history.entries(), &sender);
         rebuild_favorites_list(&widgets.favorites_list, model.favorites.entries(), &sender);
@@ -2152,11 +2159,53 @@ fn format_camera_err(e: CameraError) -> String {
     }
 }
 
-/// Place the window fully inside the current monitor: clamp default size to
-/// geometry, then fullscreen (phone-like / small) or maximize (desktop).
+/// Whether this looks like a phone/handheld session (Phosh etc.).
+fn is_mobile_desktop_env() -> bool {
+    let desk = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let session = std::env::var("XDG_SESSION_DESKTOP").unwrap_or_default();
+    let combined = format!("{desk};{session}").to_ascii_lowercase();
+    combined.contains("phosh")
+        || combined.contains("plasma-mobile")
+        || combined.contains("lomiri")
+        || combined.contains("mobile")
+}
+
+/// Handheld / phone-class display (e.g. OnePlus fajita 1920×1080 @ 16:9).
 ///
-/// Escape hatch: `LIBREFOOD_NO_FULLSCREEN=1` only clamps size (no maximize).
-/// Tests: `LIBREFOOD_WIDTH` + `LIBREFOOD_HEIGHT` set an explicit size.
+/// Previous logic required area < 1.4M or edge ≤900/700, so **1080p phones
+/// only got maximize** plus `set_default_size(mon_w, mon_h)` — too wide on
+/// Phosh. Prefer true fullscreen for Phosh and single ≤1080 short-edge panels.
+fn is_handheld_display(mon_w: i32, mon_h: i32, scale: i32, n_monitors: u32) -> bool {
+    let short = mon_w.min(mon_h);
+    let long = mon_w.max(mon_h);
+    let single = n_monitors <= 1;
+    if is_mobile_desktop_env() {
+        return true;
+    }
+    // Classic small phones / very short workareas
+    if short <= 900 || mon_h <= 700 {
+        return true;
+    }
+    // 1080p-class single panel (fajita landscape 1920×1080 or portrait 1080×1920).
+    // Hi-dpi phones usually report scale≥2; some Alpine stacks report 1 with
+    // physical geometry — still treat single ≤1080 short edge as handheld.
+    // Desktop 1080p users: set LIBREFOOD_NO_FULLSCREEN=1.
+    if single && short <= 1080 && long <= 2400 {
+        return true;
+    }
+    if single && short <= 1080 && scale >= 2 {
+        return true;
+    }
+    false
+}
+
+/// Place the window fully inside the current monitor.
+///
+/// Handheld → true fullscreen (Snapshot-style). Desktop → maximize.
+/// Default size is always clamped **below** the monitor so a failed
+/// fullscreen/maximize never leaves an oversized window.
+///
+/// Escape: `LIBREFOOD_NO_FULLSCREEN=1`. Tests: `LIBREFOOD_WIDTH`/`HEIGHT`.
 fn apply_window_placement(win: &adw::ApplicationWindow) {
     let Some(display) = gdk::Display::default() else {
         win.set_default_size(360, 480);
@@ -2164,7 +2213,7 @@ fn apply_window_placement(win: &adw::ApplicationWindow) {
     };
 
     let monitors = display.monitors();
-    // Prefer the monitor the window is on once mapped; else primary/first.
+    let n_monitors = monitors.n_items();
     let monitor = win
         .surface()
         .and_then(|s| display.monitor_at_surface(&s))
@@ -2180,6 +2229,8 @@ fn apply_window_placement(win: &adw::ApplicationWindow) {
     };
 
     let geom = monitor.geometry();
+    let scale = monitor.scale_factor().max(1);
+    // GDK geometry is in application pixels — never request larger.
     let mon_w = geom.width().max(320);
     let mon_h = geom.height().max(280);
 
@@ -2193,8 +2244,22 @@ fn apply_window_placement(win: &adw::ApplicationWindow) {
         }
     }
 
-    // Never request a default larger than the monitor.
-    win.set_default_size(mon_w, mon_h);
+    let handheld = is_handheld_display(mon_w, mon_h, scale, n_monitors);
+
+    // Soft default *inside* the monitor — do NOT set default to full geom
+    // (that was the “too wide” bug when maximize/fullscreen lagged).
+    let def_w = if handheld {
+        mon_w.min(720).max(360.min(mon_w))
+    } else {
+        520.min(mon_w).max(360.min(mon_w))
+    };
+    let def_h = if handheld {
+        mon_h.min(1280).max(400.min(mon_h))
+    } else {
+        780.min(mon_h).max(400.min(mon_h))
+    };
+    win.set_default_size(def_w.min(mon_w), def_h.min(mon_h));
+    win.set_size_request(320.min(mon_w), 280.min(mon_h));
 
     let no_fs = matches!(
         std::env::var("LIBREFOOD_NO_FULLSCREEN").as_deref(),
@@ -2204,11 +2269,8 @@ fn apply_window_placement(win: &adw::ApplicationWindow) {
         return;
     }
 
-    let phone_like = mon_w <= 900
-        || mon_h <= 700
-        || (monitors.n_items() <= 1 && (mon_w * mon_h) < 1_400_000);
-    if phone_like {
-        // True fullscreen on phones / small single displays (Wayland + X11).
+    if handheld {
+        // Snapshot-like: fill the display completely on phones.
         win.fullscreen_on_monitor(&monitor);
     } else {
         win.maximize();
@@ -2396,4 +2458,25 @@ fn load_css() {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+}
+
+#[cfg(test)]
+mod window_placement_tests {
+    use super::is_handheld_display;
+
+    #[test]
+    fn fajita_1080p_16x9_is_handheld() {
+        // Physical or logical 1920×1080 landscape (OnePlus fajita).
+        assert!(is_handheld_display(1920, 1080, 1, 1));
+        assert!(is_handheld_display(1920, 1080, 2, 1));
+        assert!(is_handheld_display(1080, 1920, 3, 1)); // portrait
+        // Logical size after scale (960×540) still handheld via short≤900.
+        assert!(is_handheld_display(960, 540, 1, 1));
+    }
+
+    #[test]
+    fn large_desktop_not_handheld_by_size_alone() {
+        assert!(!is_handheld_display(2560, 1440, 1, 1));
+        assert!(!is_handheld_display(3840, 2160, 1, 2));
+    }
 }

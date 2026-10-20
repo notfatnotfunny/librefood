@@ -859,11 +859,11 @@ impl Component for AppModel {
         #[root]
         adw::ApplicationWindow {
             set_title: Some("Librefood"),
-            // Defaults overridden in init via monitor geometry / env.
-            set_default_width: 420,
-            set_default_height: 640,
-            set_width_request: 360,
-            set_height_request: 320,
+            // Defaults overridden in init — always clamped to the monitor.
+            set_default_width: 360,
+            set_default_height: 480,
+            set_width_request: 320,
+            set_height_request: 280,
 
             #[wrap(Some)]
             set_content = &gtk::Box {
@@ -1601,7 +1601,15 @@ impl Component for AppModel {
         let widgets = view_output!();
         load_css();
         logo::apply_window_icon(&root);
-        apply_adaptive_window_size(&root);
+        apply_window_placement(&root);
+        // Re-apply after the surface exists (Wayland/X11 often ignore maximize
+        // before the window is mapped).
+        {
+            let win = root.clone();
+            gtk::glib::idle_add_local_once(move || {
+                apply_window_placement(&win);
+            });
+        }
         rebuild_history_list(&widgets.history_list, model.history.entries(), &sender);
         rebuild_favorites_list(&widgets.favorites_list, model.favorites.entries(), &sender);
         refresh_profiles_page(&widgets, &model, &sender);
@@ -1957,6 +1965,8 @@ impl Component for AppModel {
             }
             Msg::ScanCamera => {
                 if !self.scanning {
+                    // Best-effort portal ping (Snapshot-style); capture stays V4L2.
+                    try_xdg_camera_portal_hint();
                     // Re-probe so a re-login / unplugged camera is reflected.
                     self.camera_probe = camera::camera_probe();
                     if !self.camera_ok() {
@@ -2140,57 +2150,123 @@ fn format_camera_err(e: CameraError) -> String {
     }
 }
 
-/// Size the window from the primary monitor's geometry so phone/tablet Alpine
-/// ARM displays are not stuck with a tall desktop default that overflows.
+/// Place the window fully inside the current monitor: clamp default size to
+/// geometry, then fullscreen (phone-like / small) or maximize (desktop).
 ///
-/// Override with `LIBREFOOD_WIDTH` + `LIBREFOOD_HEIGHT` (also used for tests).
-fn apply_adaptive_window_size(win: &adw::ApplicationWindow) {
+/// Escape hatch: `LIBREFOOD_NO_FULLSCREEN=1` only clamps size (no maximize).
+/// Tests: `LIBREFOOD_WIDTH` + `LIBREFOOD_HEIGHT` set an explicit size.
+fn apply_window_placement(win: &adw::ApplicationWindow) {
+    let Some(display) = gdk::Display::default() else {
+        win.set_default_size(360, 480);
+        return;
+    };
+
+    let monitors = display.monitors();
+    // Prefer the monitor the window is on once mapped; else primary/first.
+    let monitor = win
+        .surface()
+        .and_then(|s| display.monitor_at_surface(&s))
+        .or_else(|| {
+            monitors
+                .item(0)
+                .and_then(|o| o.downcast::<gdk::Monitor>().ok())
+        });
+
+    let Some(monitor) = monitor else {
+        win.set_default_size(360, 480);
+        return;
+    };
+
+    let geom = monitor.geometry();
+    let mon_w = geom.width().max(320);
+    let mon_h = geom.height().max(280);
+
     if let (Ok(w), Ok(h)) = (
         std::env::var("LIBREFOOD_WIDTH"),
         std::env::var("LIBREFOOD_HEIGHT"),
     ) {
         if let (Ok(w), Ok(h)) = (w.parse::<i32>(), h.parse::<i32>()) {
-            win.set_default_size(w.max(360), h.max(320));
+            win.set_default_size(w.clamp(320, mon_w), h.clamp(280, mon_h));
             return;
         }
     }
 
-    let Some(display) = gdk::Display::default() else {
-        win.set_default_size(420, 640);
+    // Never request a default larger than the monitor.
+    win.set_default_size(mon_w, mon_h);
+
+    let no_fs = matches!(
+        std::env::var("LIBREFOOD_NO_FULLSCREEN").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
+    );
+    if no_fs {
         return;
-    };
+    }
 
-    let monitors = display.monitors();
-    let monitor = monitors
-        .item(0)
-        .and_then(|o| o.downcast::<gdk::Monitor>().ok());
-
-    let Some(monitor) = monitor else {
-        win.set_default_size(420, 640);
-        return;
-    };
-
-    let geom = monitor.geometry();
-    // Leave room for panels / chrome.
-    let usable_w = (geom.width() - 48).max(360);
-    let usable_h = (geom.height() - 64).max(320);
-
-    let phone_like = usable_w <= 600 || usable_h <= 520;
-    let small = phone_like || usable_w <= 900 || usable_h <= 700;
-
+    let phone_like = mon_w <= 900
+        || mon_h <= 700
+        || (monitors.n_items() <= 1 && (mon_w * mon_h) < 1_400_000);
     if phone_like {
-        // Fill the usable area and maximize — portrait defaults fight landscape phones.
-        win.set_default_size(usable_w, usable_h);
-        win.maximize();
-    } else if small {
-        // Nearly full usable area without forcing maximize on larger tablets.
-        let w = usable_w.min(720).max(360);
-        let h = usable_h.max(320);
-        win.set_default_size(w, h);
+        // True fullscreen on phones / small single displays (Wayland + X11).
+        win.fullscreen_on_monitor(&monitor);
     } else {
-        let w = 520.min(usable_w).max(360);
-        let h = 780.min(usable_h).max(400);
-        win.set_default_size(w, h);
+        win.maximize();
+    }
+}
+
+/// Best-effort xdg-desktop-portal Camera presence check (Snapshot uses portal
+/// + PipeWire for capture). We still open via V4L2; this only logs / warms
+/// the portal when available.
+fn try_xdg_camera_portal_hint() {
+    use gtk::gio;
+    use gtk::gio::prelude::*;
+    use gtk::glib;
+
+    let debug = matches!(
+        std::env::var("LIBREFOOD_CAMERA_DEBUG").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
+    );
+
+    let Ok(proxy) = gio::DBusProxy::for_bus_sync(
+        gio::BusType::Session,
+        gio::DBusProxyFlags::NONE,
+        None,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Camera",
+        gio::Cancellable::NONE,
+    ) else {
+        if debug {
+            eprintln!("[librefood camera] xdg-desktop-portal Camera interface unavailable (OK on Alpine — using V4L2)");
+        }
+        return;
+    };
+
+    if let Some(v) = proxy.cached_property("IsCameraPresent") {
+        if debug {
+            eprintln!("[librefood camera] portal IsCameraPresent={v}");
+        }
+    }
+
+    // Fire AccessCamera with empty options; ignore failures (no portal / denied).
+    let opts = glib::VariantDict::new(None).end();
+    let args = glib::Variant::tuple_from_iter(std::iter::once(opts));
+    match proxy.call_sync(
+        "AccessCamera",
+        Some(&args),
+        gio::DBusCallFlags::NONE,
+        1500,
+        gio::Cancellable::NONE,
+    ) {
+        Ok(ret) => {
+            if debug {
+                eprintln!("[librefood camera] portal AccessCamera started: {ret}");
+            }
+        }
+        Err(e) => {
+            if debug {
+                eprintln!("[librefood camera] portal AccessCamera: {e} (falling back to V4L2)");
+            }
+        }
     }
 }
 

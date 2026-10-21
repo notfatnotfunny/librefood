@@ -192,9 +192,9 @@ pub fn apply(product: &mut ProductModel) {
     }
 }
 
-/// Build search strings: prefer short brand cores over legal entity names.
-/// OFF often has `COCA-COLA SERVICES SA/NV` which 404s; API wants `Coca-Cola`.
-fn brand_queries(product: &ProductModel) -> Vec<String> {
+/// Brand search strings derived from OFF brands (aliases, legal-suffix strip).
+/// Shared with WikiRate enrichment.
+pub fn brand_queries(product: &ProductModel) -> Vec<String> {
     let mut raw: Vec<String> = Vec::new();
     if let Some(b) = product
         .brand_primary

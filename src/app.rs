@@ -2798,7 +2798,7 @@ fn texture_from_bytes(bytes: Option<&[u8]>) -> Option<gdk::Texture> {
     gdk::Texture::from_bytes(&gbytes).ok()
 }
 
-/// OFF lookup plus boycottisraeli.biz brand enrichment (`boycott_listed` attr).
+/// OFF lookup plus boycott + WikiRate brand enrichment.
 #[allow(dead_code)]
 pub fn lookup_product_enriched(code: &str) -> Result<ProductModel, String> {
     lookup_product_enriched_with_progress(code, |_| {})
@@ -2811,6 +2811,7 @@ pub fn lookup_product_enriched_with_progress(
     let mut product =
         off::lookup_product_with_progress(code, on_retry).map_err(format_lookup_err)?;
     crate::boycott::apply(&mut product);
+    crate::wikirate::apply(&mut product);
     Ok(product)
 }
 

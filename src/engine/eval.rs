@@ -266,7 +266,11 @@ fn format_value(attribute: &str, v: f64) -> String {
         || attribute == "nutriscore_ordinal"
         || attribute == "organic"
         || attribute == "boycott_listed"
+        || attribute == "wikirate_score"
     {
+        if attribute == "wikirate_score" {
+            return format!("{:.0}/100", v.round());
+        }
         if (v - v.round()).abs() < 1e-9 {
             return format!("{}", v.round() as i64);
         }

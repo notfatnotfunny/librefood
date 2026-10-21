@@ -321,6 +321,7 @@ pub fn normalize_barcode(raw: &str) -> String {
         .collect()
 }
 
+#[allow(dead_code)]
 pub fn lookup_product(barcode: &str) -> Result<ProductModel, LookupError> {
     lookup_product_with_progress(barcode, |_| {})
 }

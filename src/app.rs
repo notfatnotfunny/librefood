@@ -1294,8 +1294,8 @@ impl Component for AppModel {
                                 set_label: "Search",
                                 add_css_class: "suggested-action",
                                 set_valign: gtk::Align::Center,
-                                #[watch]
-                                set_sensitive: !matches!(model.status_kind, StatusKind::Loading),
+                                // Stay clickable during OFF retries; a new Search
+                                // cancels the previous one via network_gen.
                                 connect_clicked[sender] => move |_| {
                                     sender.input(Msg::Search);
                                 },
@@ -1386,7 +1386,7 @@ impl Component for AppModel {
                                 add_css_class: "suggested-action",
                                 set_valign: gtk::Align::Center,
                                 #[watch]
-                                set_sensitive: !matches!(model.status_kind, StatusKind::Loading) && !model.scanning,
+                                set_sensitive: !model.scanning,
                                 connect_clicked[sender] => move |_| {
                                     sender.input(Msg::Lookup);
                                 },
@@ -2123,9 +2123,8 @@ impl Component for AppModel {
                 self.search_query = text;
             }
             Msg::Lookup => {
-                if matches!(self.status_kind, StatusKind::Loading) {
-                    return;
-                }
+                // Do not gate on Loading — OpenLibraryBarcode / PickSearchHit queue
+                // Lookup after setting status; network_gen drops stale LookupDone.
                 let code = off::normalize_barcode(&self.barcode);
                 if code.is_empty() {
                     self.status_kind = StatusKind::Error;
@@ -2159,11 +2158,10 @@ impl Component for AppModel {
                 }
             }
             Msg::Search => {
-                if matches!(self.status_kind, StatusKind::Loading) {
-                    return;
-                }
                 // Prefer live Entry text — avoids an empty query when Search
                 // is processed before a pending SearchChanged.
+                // Allow a new search even if a prior request is in flight;
+                // bumping network_gen cancels the old SearchDone.
                 let from_entry = widgets.search_entry.text().to_string();
                 let q = {
                     let t = from_entry.trim();
@@ -2528,8 +2526,8 @@ impl Component for AppModel {
                 self.search_return = SearchPane::Hub;
                 self.barcode = off::normalize_barcode(&code);
                 widgets.barcode_entry.set_text(&self.barcode);
-                self.status_kind = StatusKind::Loading;
-                self.status_text = format!("Looking up {}…", self.barcode);
+                // Lookup sets Loading / status; don't pre-set or it used to
+                // trip a Loading guard and never start the request.
                 queue_msg(&sender, Msg::Lookup);
             }
             Msg::ClearHistory => {

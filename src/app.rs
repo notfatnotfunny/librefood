@@ -1294,8 +1294,8 @@ impl Component for AppModel {
                                 set_label: "Search",
                                 add_css_class: "suggested-action",
                                 set_valign: gtk::Align::Center,
-                                #[watch]
-                                set_sensitive: !matches!(model.status_kind, StatusKind::Loading),
+                                // Stay clickable during OFF retries; a new Search
+                                // cancels the previous one via network_gen.
                                 connect_clicked[sender] => move |_| {
                                     sender.input(Msg::Search);
                                 },
@@ -1386,7 +1386,7 @@ impl Component for AppModel {
                                 add_css_class: "suggested-action",
                                 set_valign: gtk::Align::Center,
                                 #[watch]
-                                set_sensitive: !matches!(model.status_kind, StatusKind::Loading) && !model.scanning,
+                                set_sensitive: !model.scanning,
                                 connect_clicked[sender] => move |_| {
                                     sender.input(Msg::Lookup);
                                 },

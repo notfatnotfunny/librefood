@@ -98,11 +98,27 @@ fn non_empty(s: Option<String>) -> Option<String> {
 }
 
 fn primary_brand(brands: Option<&str>) -> Option<String> {
-    brands
-        .and_then(|b| b.split(',').next())
+    let first = brands
+        .and_then(|b| b.split([',', ';']).next())
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+        .filter(|s| !s.is_empty())?;
+    // Drop trailing flavor/size tokens ("Coke ZERO" → "Coke").
+    let noise = [
+        "zero", "light", "diet", "maxi", "mini", "original", "classic", "sugar", "free", "sans",
+        "sucres", "sucre",
+    ];
+    let kept: Vec<&str> = first
+        .split_whitespace()
+        .filter(|t| {
+            let n = t.to_ascii_lowercase();
+            !noise.iter().any(|w| *w == n)
+        })
+        .collect();
+    if kept.is_empty() {
+        Some(first.to_string())
+    } else {
+        Some(kept.join(" "))
+    }
 }
 
 fn product_title(product: &OffProduct) -> String {
@@ -306,6 +322,14 @@ pub fn normalize_barcode(raw: &str) -> String {
 }
 
 pub fn lookup_product(barcode: &str) -> Result<ProductModel, LookupError> {
+    lookup_product_with_progress(barcode, |_| {})
+}
+
+/// Like [`lookup_product`], calling `on_retry(attempt)` before each retry (1-based).
+pub fn lookup_product_with_progress(
+    barcode: &str,
+    mut on_retry: impl FnMut(u32),
+) -> Result<ProductModel, LookupError> {
     let code = normalize_barcode(barcode);
     if code.is_empty() {
         return Err(LookupError::EmptyBarcode);
@@ -313,9 +337,19 @@ pub fn lookup_product(barcode: &str) -> Result<ProductModel, LookupError> {
 
     let url = format!("{OFF_PRODUCT_URL}/{code}.json");
     let client = http_client()?;
+    with_transient_retries(
+        || lookup_product_once(&client, &url, &code),
+        &mut on_retry,
+    )
+}
 
+fn lookup_product_once(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    code: &str,
+) -> Result<ProductModel, LookupError> {
     let response = client
-        .get(&url)
+        .get(url)
         .send()
         .map_err(|e| LookupError::Network(e.to_string()))?;
 
@@ -337,17 +371,83 @@ pub fn lookup_product(barcode: &str) -> Result<ProductModel, LookupError> {
     let image_url = pick_image_url(&product);
     let image_bytes = image_url
         .as_deref()
-        .and_then(|u| fetch_image_bytes(&client, u));
-    Ok(to_model(code, product, image_bytes))
+        .and_then(|u| fetch_image_bytes(client, u));
+    Ok(to_model(code.to_string(), product, image_bytes))
 }
 
 /// Simple OFF text search; returns top hits (barcode + name).
+/// Retries transient OFF failures (esp. HTTP 503) so the user doesn't need
+/// to mash Search.
+#[allow(dead_code)]
 pub fn search_products(query: &str, page_size: u32) -> Result<Vec<SearchHit>, LookupError> {
+    search_products_with_progress(query, page_size, |_| {})
+}
+
+/// Like [`search_products`], calling `on_retry(attempt)` before each retry (1-based).
+pub fn search_products_with_progress(
+    query: &str,
+    page_size: u32,
+    mut on_retry: impl FnMut(u32),
+) -> Result<Vec<SearchHit>, LookupError> {
     let q = query.trim();
     if q.is_empty() {
         return Err(LookupError::EmptyQuery);
     }
     let client = http_client()?;
+    with_transient_retries(
+        || search_products_once(&client, q, page_size),
+        &mut on_retry,
+    )
+}
+
+const TRANSIENT_ATTEMPTS: u32 = 6;
+
+fn with_transient_retries<T>(
+    mut attempt_fn: impl FnMut() -> Result<T, LookupError>,
+    on_retry: &mut impl FnMut(u32),
+) -> Result<T, LookupError> {
+    let mut last_err = LookupError::Network("request failed".into());
+    for attempt in 0..TRANSIENT_ATTEMPTS {
+        match attempt_fn() {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt + 1 < TRANSIENT_ATTEMPTS && is_transient_err(&e) => {
+                last_err = e;
+                let n = attempt + 1;
+                on_retry(n);
+                // 0.5s, 1s, 2s, 3s, 3s …
+                let ms = (500u64 * (1u64 << attempt.min(2))).min(3000);
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err)
+}
+
+fn is_transient_err(err: &LookupError) -> bool {
+    match err {
+        LookupError::Network(msg) => {
+            let m = msg.to_ascii_lowercase();
+            m.contains("503")
+                || m.contains("502")
+                || m.contains("504")
+                || m.contains("429")
+                || m.contains("timeout")
+                || m.contains("timed out")
+                || m.contains("connection")
+                || m.contains("temporarily")
+                || m.contains("reset")
+        }
+        LookupError::BadResponse => true,
+        _ => false,
+    }
+}
+
+fn search_products_once(
+    client: &reqwest::blocking::Client,
+    q: &str,
+    page_size: u32,
+) -> Result<Vec<SearchHit>, LookupError> {
     let response = client
         .get(OFF_SEARCH_URL)
         .query(&[
@@ -396,6 +496,22 @@ mod tests {
             primary_brand(Some("Nutella, Ferrero")).as_deref(),
             Some("Nutella")
         );
+    }
+
+    #[test]
+    fn primary_brand_strips_flavor_noise() {
+        assert_eq!(primary_brand(Some("Coke ZERO")).as_deref(), Some("Coke"));
+        assert_eq!(
+            primary_brand(Some("Barilla, Pesto")).as_deref(),
+            Some("Barilla")
+        );
+    }
+
+    #[test]
+    fn transient_detects_503() {
+        assert!(is_transient_err(&LookupError::Network(
+            "HTTP 503 Service Unavailable".into()
+        )));
     }
 }
 

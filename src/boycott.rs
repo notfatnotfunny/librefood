@@ -9,6 +9,48 @@ const API_BASE: &str = "https://api.boycottisraeli.biz/v1";
 const USER_AGENT: &str =
     "Librefood/0.2 (+https://github.com/notfatnotfunny/librefood; ethical-consumer)";
 
+/// Common OFF spellings / short names → canonical boycott API query.
+/// Keys must be [`normalize`]d (lowercase, punctuation → spaces).
+const BRAND_ALIASES: &[(&str, &str)] = &[
+    ("coca cola", "Coca-Cola"),
+    ("cocacola", "Coca-Cola"),
+    ("coke", "Coca-Cola"),
+    ("pepsi", "Pepsi"),
+    ("pepsico", "PepsiCo"),
+    ("nestle", "Nestlé"),
+    ("nestlé", "Nestlé"),
+    ("mcdonalds", "McDonald's"),
+    ("mcdonald s", "McDonald's"),
+    ("starbucks", "Starbucks"),
+    ("danone", "Danone"),
+    ("kraft", "Kraft"),
+    ("heinz", "Heinz"),
+    ("kelloggs", "Kellogg's"),
+    ("kellogg s", "Kellogg's"),
+    ("mondelez", "Mondelez"),
+    ("unilever", "Unilever"),
+    ("loreal", "L'Oréal"),
+    ("l oreal", "L'Oréal"),
+];
+
+/// Flavor / size words that OFF sometimes stuffs into the brands field.
+const BRAND_NOISE: &[&str] = &[
+    "zero",
+    "light",
+    "diet",
+    "maxi",
+    "mini",
+    "original",
+    "classic",
+    "sugar",
+    "free",
+    "sans",
+    "sucres",
+    "sucre",
+    "sugarfree",
+    "zerosugar",
+];
+
 /// Legal / corporate suffixes that are useless as search keys (and cause 404s).
 const LEGAL_STOP: &[&str] = &[
     "sa",
@@ -174,24 +216,75 @@ fn brand_queries(product: &ProductModel) -> Vec<String> {
     }
 
     let mut out: Vec<String> = Vec::new();
+    // Aliases first — API 404s on "Cocacola" / "Coke" but hits on "Coca-Cola".
     for r in &raw {
-        // Core first (COCA-COLA), then stripped legal form, then full string last.
-        if let Some(core) = brand_core(r) {
+        let cleaned = strip_brand_noise(r);
+        for candidate in [cleaned.as_str(), r.as_str()] {
+            if let Some(alias) = alias_for(candidate) {
+                push_unique(&mut out, alias);
+            }
+        }
+    }
+    for r in &raw {
+        let cleaned = strip_brand_noise(r);
+        // Prefer cleaned ("Coke") over noisy OFF brands ("Coke ZERO").
+        let candidate = if cleaned.is_empty() {
+            r.as_str()
+        } else {
+            cleaned.as_str()
+        };
+        if let Some(core) = brand_core(candidate) {
             push_unique(&mut out, &core);
         }
-        if let Some(stripped) = strip_legal_suffixes(r) {
+        if let Some(stripped) = strip_legal_suffixes(candidate) {
             push_unique(&mut out, &stripped);
             if let Some(core) = brand_core(&stripped) {
                 push_unique(&mut out, &core);
             }
         }
-        if !is_legal_stop(r) && r.chars().count() >= 4 {
-            push_unique(&mut out, r);
+        // Also try legal-strip on the raw string (entity names rarely have noise).
+        if cleaned != *r {
+            if let Some(stripped) = strip_legal_suffixes(r) {
+                push_unique(&mut out, &stripped);
+            }
+        }
+        if !is_legal_stop(candidate) && candidate.chars().count() >= 4 {
+            push_unique(&mut out, candidate);
         }
     }
 
-    out.truncate(6);
+    out.truncate(8);
     out
+}
+
+fn alias_for(s: &str) -> Option<&'static str> {
+    let n = normalize(s);
+    if n.is_empty() {
+        return None;
+    }
+    let compact = n.replace(' ', "");
+    for &(key, canon) in BRAND_ALIASES {
+        let kn = normalize(key);
+        let kc = kn.replace(' ', "");
+        if n == kn || compact == kc {
+            return Some(canon);
+        }
+    }
+    None
+}
+
+fn strip_brand_noise(s: &str) -> String {
+    let parts: Vec<&str> = s
+        .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .filter(|p| !BRAND_NOISE.contains(&normalize(p).as_str()))
+        .collect();
+    if parts.is_empty() {
+        s.trim().to_string()
+    } else {
+        parts.join(" ")
+    }
 }
 
 fn push_unique(out: &mut Vec<String>, s: &str) {
@@ -522,6 +615,24 @@ mod tests {
     }
 
     #[test]
+    fn brand_queries_alias_cocacola_and_coke_zero() {
+        let a = brand_queries(&product("Cocacola", "Cocacola zero"));
+        assert!(
+            a.iter().any(|x| x.eq_ignore_ascii_case("Coca-Cola")),
+            "Cocacola → Coca-Cola: {a:?}"
+        );
+        let b = brand_queries(&product("Coke ZERO", "Cocacola mini zero sugar"));
+        assert!(
+            b.first().is_some_and(|x| x.eq_ignore_ascii_case("Coca-Cola")),
+            "Coke ZERO should prefer Coca-Cola first: {b:?}"
+        );
+        assert!(
+            !b.iter().any(|x| normalize(x) == "coke zero"),
+            "should not query noisy brand as-is: {b:?}"
+        );
+    }
+
+    #[test]
     fn match_accepts_coca_cola_company() {
         let cos = vec![Company {
             name: Some("The Coca-Cola Company".into()),
@@ -594,6 +705,25 @@ mod tests {
             "expected why/alternatives in src={}",
             attr.source
         );
+    }
+
+    #[test]
+    #[ignore = "live network"]
+    fn live_cocacola_alias_matches() {
+        let mut p = product("Cocacola", "Cocacola zero");
+        apply(&mut p);
+        let attr = p.attributes.get(attrs::BOYCOTT_LISTED).expect("attr");
+        assert_eq!(attr.value, Some(1.0), "src={}", attr.source);
+        assert!(attr.source.contains("Why:"), "src={}", attr.source);
+    }
+
+    #[test]
+    #[ignore = "live network"]
+    fn live_coke_zero_alias_matches() {
+        let mut p = product("Coke ZERO", "mini");
+        apply(&mut p);
+        let attr = p.attributes.get(attrs::BOYCOTT_LISTED).expect("attr");
+        assert_eq!(attr.value, Some(1.0), "src={}", attr.source);
     }
 
     #[test]

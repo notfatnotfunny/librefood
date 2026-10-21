@@ -23,8 +23,10 @@ pub enum Msg {
     SearchChanged(String),
     Lookup,
     Search,
-    LookupDone(Result<ProductModel, String>),
-    SearchDone(Result<Vec<off::SearchHit>, String>),
+    /// Status line while a search/lookup is still in flight (e.g. OFF 503 retry).
+    NetworkProgress(String),
+    SearchDone(u64, Result<Vec<off::SearchHit>, String>),
+    LookupDone(u64, Result<ProductModel, String>),
     PickSearchHit(String),
     ScanCamera,
     PreviewFrame {
@@ -137,6 +139,8 @@ pub struct AppModel {
     profile_ids: Vec<String>,
     active_profile_index: u32,
     search_hits: Vec<off::SearchHit>,
+    /// Monotonic id so late SearchDone/LookupDone from older requests are ignored.
+    network_gen: u64,
     page: AppPage,
     /// Navigation inside the Search tab (hub → mode → product).
     search_pane: SearchPane,
@@ -905,6 +909,9 @@ fn append_factor_rows(container: &gtk::Box, rows: &[score::FactorRow]) {
         detail.add_css_class("factor-detail");
         detail.set_halign(gtk::Align::Start);
         detail.set_wrap(true);
+        detail.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        detail.set_max_width_chars(36);
+        detail.set_hexpand(true);
         detail.set_xalign(0.0);
 
         text_col.append(&title);
@@ -942,6 +949,8 @@ fn append_explanation(container: &gtk::Box, lines: &[String]) {
         lab.add_css_class("explain-line");
         lab.set_halign(gtk::Align::Start);
         lab.set_wrap(true);
+        lab.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        lab.set_max_width_chars(40);
         lab.set_xalign(0.0);
         lab.set_selectable(true);
         container.append(&lab);
@@ -957,12 +966,21 @@ fn append_search_hits(
     for hit in hits {
         let btn = gtk::Button::new();
         btn.set_halign(gtk::Align::Fill);
-        let label = if let Some(b) = &hit.brands {
+        btn.set_hexpand(true);
+        let text = if let Some(b) = &hit.brands {
             format!("{} — {} ({})", hit.name, b, hit.barcode)
         } else {
             format!("{} ({})", hit.name, hit.barcode)
         };
-        btn.set_label(&label);
+        // Wrapped label so long OFF names don't force the window wider.
+        let lab = gtk::Label::new(Some(&text));
+        lab.set_wrap(true);
+        lab.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        lab.set_max_width_chars(36);
+        lab.set_xalign(0.0);
+        lab.set_halign(gtk::Align::Start);
+        lab.set_hexpand(true);
+        btn.set_child(Some(&lab));
         let code = hit.barcode.clone();
         let sender = sender.clone();
         btn.connect_clicked(move |_| {
@@ -1261,6 +1279,7 @@ impl Component for AppModel {
                             set_orientation: model.input_orientation(),
                             set_spacing: 8,
 
+                            #[name = "search_entry"]
                             gtk::Entry {
                                 set_hexpand: true,
                                 set_placeholder_text: Some("Product name…"),
@@ -1288,6 +1307,8 @@ impl Component for AppModel {
                             set_label: &model.status_text,
                             set_halign: gtk::Align::Start,
                             set_wrap: true,
+                            set_wrap_mode: gtk::pango::WrapMode::WordChar,
+                            set_max_width_chars: 42,
                             set_xalign: 0.0,
                             #[watch]
                             set_css_classes: &[model.status_css()],
@@ -1304,12 +1325,14 @@ impl Component for AppModel {
                         gtk::ScrolledWindow {
                             set_vexpand: true,
                             set_hexpand: true,
+                            set_propagate_natural_width: false,
                             set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
 
                             #[name = "search_hits"]
                             gtk::Box {
                                 set_orientation: gtk::Orientation::Vertical,
                                 set_spacing: 2,
+                                set_hexpand: true,
                             },
                         },
                     },
@@ -1397,6 +1420,8 @@ impl Component for AppModel {
                         set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
                         #[watch]
                         set_visible: model.is_search_product(),
+                        set_propagate_natural_width: false,
+                        set_propagate_natural_height: false,
 
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
@@ -1405,12 +1430,14 @@ impl Component for AppModel {
                             set_margin_bottom: 28,
                             set_margin_start: 16,
                             set_margin_end: 16,
+                            set_hexpand: true,
                             add_css_class: "product-page",
 
                             gtk::Box {
                                 #[watch]
                                 set_orientation: model.header_orientation(),
                                 set_spacing: 12,
+                                set_hexpand: true,
 
                                 gtk::Picture {
                                     set_content_fit: gtk::ContentFit::Cover,
@@ -1419,6 +1446,7 @@ impl Component for AppModel {
                                     set_height_request: 88,
                                     set_halign: gtk::Align::Start,
                                     set_hexpand: false,
+                                    set_vexpand: false,
                                     #[watch]
                                     set_visible: model.product_image.is_some(),
                                     #[watch]
@@ -1437,6 +1465,8 @@ impl Component for AppModel {
                                         add_css_class: "product-name",
                                         set_halign: gtk::Align::Start,
                                         set_wrap: true,
+                                        set_wrap_mode: gtk::pango::WrapMode::WordChar,
+                                        set_max_width_chars: 28,
                                         set_xalign: 0.0,
                                         set_selectable: true,
                                     },
@@ -1446,6 +1476,8 @@ impl Component for AppModel {
                                         add_css_class: "product-brand",
                                         set_halign: gtk::Align::Start,
                                         set_wrap: true,
+                                        set_wrap_mode: gtk::pango::WrapMode::WordChar,
+                                        set_max_width_chars: 28,
                                         set_xalign: 0.0,
                                         #[watch]
                                         set_visible: !model.product_brand().is_empty(),
@@ -1489,6 +1521,8 @@ impl Component for AppModel {
                                 add_css_class: "dim-label",
                                 set_halign: gtk::Align::Start,
                                 set_wrap: true,
+                                set_wrap_mode: gtk::pango::WrapMode::WordChar,
+                                set_max_width_chars: 40,
                                 set_xalign: 0.0,
                                 set_selectable: true,
                             },
@@ -1498,6 +1532,8 @@ impl Component for AppModel {
                                 add_css_class: "missing-label",
                                 set_halign: gtk::Align::Start,
                                 set_wrap: true,
+                                set_wrap_mode: gtk::pango::WrapMode::WordChar,
+                                set_max_width_chars: 40,
                                 set_xalign: 0.0,
                                 #[watch]
                                 set_visible: !model.missing_caption().is_empty(),
@@ -1876,6 +1912,7 @@ impl Component for AppModel {
             profile_ids: vec![],
             active_profile_index: 0,
             search_hits: vec![],
+            network_gen: 0,
             page: page_init,
             search_pane: SearchPane::Hub,
             search_return: SearchPane::Hub,
@@ -2086,6 +2123,9 @@ impl Component for AppModel {
                 self.search_query = text;
             }
             Msg::Lookup => {
+                if matches!(self.status_kind, StatusKind::Loading) {
+                    return;
+                }
                 let code = off::normalize_barcode(&self.barcode);
                 if code.is_empty() {
                     self.status_kind = StatusKind::Error;
@@ -2095,6 +2135,8 @@ impl Component for AppModel {
                     clear_lists(widgets);
                 } else {
                     self.barcode = code.clone();
+                    self.network_gen = self.network_gen.wrapping_add(1);
+                    let gen = self.network_gen;
                     self.status_kind = StatusKind::Loading;
                     self.status_text = format!("Looking up {code}…");
                     self.product = None;
@@ -2104,44 +2146,84 @@ impl Component for AppModel {
                     clear_lists(widgets);
                     let sender2 = sender.clone();
                     thread::spawn(move || {
-                        let result = crate::app::lookup_product_enriched(&code);
-                        sender2.input(Msg::LookupDone(result));
+                        let result = crate::app::lookup_product_enriched_with_progress(
+                            &code,
+                            |n| {
+                                sender2.input(Msg::NetworkProgress(format!(
+                                    "Open Food Facts busy — retrying lookup ({n})…"
+                                )));
+                            },
+                        );
+                        sender2.input(Msg::LookupDone(gen, result));
                     });
                 }
             }
             Msg::Search => {
-                let q = self.search_query.trim().to_string();
+                if matches!(self.status_kind, StatusKind::Loading) {
+                    return;
+                }
+                // Prefer live Entry text — avoids an empty query when Search
+                // is processed before a pending SearchChanged.
+                let from_entry = widgets.search_entry.text().to_string();
+                let q = {
+                    let t = from_entry.trim();
+                    if t.is_empty() {
+                        self.search_query.trim().to_string()
+                    } else {
+                        t.to_string()
+                    }
+                };
+                self.search_query = q.clone();
                 if q.is_empty() {
                     self.status_kind = StatusKind::Error;
                     self.status_text = "Enter a search term.".into();
                 } else {
+                    self.network_gen = self.network_gen.wrapping_add(1);
+                    let gen = self.network_gen;
                     self.status_kind = StatusKind::Loading;
                     self.status_text = format!("Searching “{q}”…");
+                    self.search_hits.clear();
+                    clear_box(&widgets.search_hits);
                     let sender2 = sender.clone();
                     thread::spawn(move || {
-                        let result = off::search_products(&q, 8).map_err(format_lookup_err);
-                        sender2.input(Msg::SearchDone(result));
+                        let result = off::search_products_with_progress(&q, 8, |n| {
+                            sender2.input(Msg::NetworkProgress(format!(
+                                "Open Food Facts busy — retrying search ({n})…"
+                            )));
+                        })
+                        .map_err(format_lookup_err);
+                        sender2.input(Msg::SearchDone(gen, result));
                     });
                 }
             }
-            Msg::SearchDone(result) => match result {
-                Ok(hits) => {
-                    self.status_kind = StatusKind::Success;
-                    self.status_text = if hits.is_empty() {
-                        "No search results.".into()
-                    } else {
-                        format!("{} result(s) — pick one.", hits.len())
-                    };
-                    self.search_hits = hits;
-                    append_search_hits(&widgets.search_hits, &self.search_hits, &sender);
+            Msg::NetworkProgress(text) => {
+                if matches!(self.status_kind, StatusKind::Loading) {
+                    self.status_text = text;
                 }
-                Err(msg) => {
-                    self.status_kind = StatusKind::Error;
-                    self.status_text = msg;
-                    self.search_hits.clear();
-                    clear_box(&widgets.search_hits);
+            }
+            Msg::SearchDone(gen, result) => {
+                if gen != self.network_gen {
+                    return;
                 }
-            },
+                match result {
+                    Ok(hits) => {
+                        self.status_kind = StatusKind::Success;
+                        self.status_text = if hits.is_empty() {
+                            "No search results.".into()
+                        } else {
+                            format!("{} result(s) — pick one.", hits.len())
+                        };
+                        self.search_hits = hits;
+                        append_search_hits(&widgets.search_hits, &self.search_hits, &sender);
+                    }
+                    Err(msg) => {
+                        self.status_kind = StatusKind::Error;
+                        self.status_text = msg;
+                        self.search_hits.clear();
+                        clear_box(&widgets.search_hits);
+                    }
+                }
+            }
             Msg::PickSearchHit(code) => {
                 self.barcode = code;
                 widgets.barcode_entry.set_text(&self.barcode);
@@ -2150,7 +2232,11 @@ impl Component for AppModel {
                 self.search_return = SearchPane::Text;
                 queue_msg(&sender, Msg::Lookup);
             }
-            Msg::LookupDone(result) => match result {
+            Msg::LookupDone(gen, result) => {
+                if gen != self.network_gen {
+                    return;
+                }
+                match result {
                 Ok(info) => {
                     self.status_kind = StatusKind::Success;
                     self.product_image = texture_from_bytes(info.image_bytes.as_deref());
@@ -2201,7 +2287,8 @@ impl Component for AppModel {
                     self.product_image = None;
                     clear_lists(widgets);
                 }
-            },
+                }
+            }
             Msg::ProfileSelected(idx) => {
                 if !self.suppress_profile_dropdown {
                     if let Some(id) = self.profile_ids.get(idx as usize).cloned() {
@@ -2595,13 +2682,22 @@ impl Component for AppModel {
                     Ok(code) => {
                         self.barcode = off::normalize_barcode(&code);
                         widgets.barcode_entry.set_text(&self.barcode);
+                        self.network_gen = self.network_gen.wrapping_add(1);
+                        let gen = self.network_gen;
                         self.status_kind = StatusKind::Loading;
                         self.status_text = format!("Scanned {}. Looking up…", self.barcode);
                         let code2 = self.barcode.clone();
                         let sender2 = sender.clone();
                         thread::spawn(move || {
-                            let result = crate::app::lookup_product_enriched(&code2);
-                            sender2.input(Msg::LookupDone(result));
+                            let result = crate::app::lookup_product_enriched_with_progress(
+                                &code2,
+                                |n| {
+                                    sender2.input(Msg::NetworkProgress(format!(
+                                        "Open Food Facts busy — retrying lookup ({n})…"
+                                    )));
+                                },
+                            );
+                            sender2.input(Msg::LookupDone(gen, result));
                         });
                     }
                     Err(msg) => {
@@ -2701,8 +2797,17 @@ fn texture_from_bytes(bytes: Option<&[u8]>) -> Option<gdk::Texture> {
 }
 
 /// OFF lookup plus boycottisraeli.biz brand enrichment (`boycott_listed` attr).
+#[allow(dead_code)]
 pub fn lookup_product_enriched(code: &str) -> Result<ProductModel, String> {
-    let mut product = off::lookup_product(code).map_err(format_lookup_err)?;
+    lookup_product_enriched_with_progress(code, |_| {})
+}
+
+pub fn lookup_product_enriched_with_progress(
+    code: &str,
+    on_retry: impl FnMut(u32),
+) -> Result<ProductModel, String> {
+    let mut product =
+        off::lookup_product_with_progress(code, on_retry).map_err(format_lookup_err)?;
     crate::boycott::apply(&mut product);
     Ok(product)
 }
@@ -2982,7 +3087,9 @@ fn load_css() {
         .product-image {
             border-radius: 12px;
             min-width: 72px;
+            max-width: 88px;
             min-height: 72px;
+            max-height: 88px;
             background: alpha(@card_fg_color, 0.06);
         }
         .score-number {

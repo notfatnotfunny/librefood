@@ -19,6 +19,8 @@ pub mod attrs {
     pub const ALLERGEN_COUNT: &str = "allergen_count";
     /// 1.0 if brand matched on boycottisraeli.biz, 0.0 if searched with no match.
     pub const BOYCOTT_LISTED: &str = "boycott_listed";
+    /// 0–100 WikiRate ESG-style score (WBA Food & Agriculture Benchmark ×10).
+    pub const WIKIRATE_SCORE: &str = "wikirate_score";
 }
 
 /// Availability of a single attribute from the data source.

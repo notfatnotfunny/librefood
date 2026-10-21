@@ -11,6 +11,7 @@ mod product;
 mod profiles;
 mod score;
 mod ui_profiles;
+mod wikirate;
 
 use app::{AppModel, AppPage};
 use relm4::prelude::*;

@@ -37,7 +37,6 @@ pub struct ScoreSummary {
     pub status: FactorStatus,
     pub profile_id: String,
     pub profile_name: String,
-    pub profile_version: u32,
     pub incomplete: bool,
     pub negatives: Vec<FactorRow>,
     pub positives: Vec<FactorRow>,
@@ -51,8 +50,8 @@ pub fn summary_from_result(result: &ScoreResult) -> ScoreSummary {
     let mut explanation_lines = Vec::new();
 
     explanation_lines.push(format!(
-        "Profile “{}” (`{}`) v{} · {} pts · base contributions below",
-        result.profile_name, result.profile_id, result.profile_version, result.score as u8
+        "Profile “{}” (`{}`) · {} pts · base contributions below",
+        result.profile_name, result.profile_id, result.score as u8
     ));
 
     for c in &result.contributions {
@@ -123,7 +122,6 @@ pub fn summary_from_result(result: &ScoreResult) -> ScoreSummary {
         status: FactorStatus::from(result.tone),
         profile_id: result.profile_id.clone(),
         profile_name: result.profile_name.clone(),
-        profile_version: result.profile_version,
         incomplete: result.incomplete,
         negatives,
         positives,

@@ -15,12 +15,40 @@ cargo build --release
 
 Optional: `librefood --barcode 3017620422003` or `--page profiles|history|favorites`.
 
+## Install (launcher + logo)
+
+User-local install puts the binary on `PATH`, the `.desktop` entry in the app drawer, and the SVG/PNG icons under the hicolor theme:
+
+```bash
+cargo build --release
+
+install -Dm755 target/release/librefood ~/.local/bin/librefood
+
+install -Dm644 data/org.librefood.Librefood.desktop \
+  ~/.local/share/applications/org.librefood.Librefood.desktop
+
+install -Dm644 data/icons/hicolor/scalable/apps/org.librefood.Librefood.svg \
+  ~/.local/share/icons/hicolor/scalable/apps/org.librefood.Librefood.svg
+install -Dm644 data/icons/hicolor/256x256/apps/org.librefood.Librefood.png \
+  ~/.local/share/icons/hicolor/256x256/apps/org.librefood.Librefood.png
+install -Dm644 data/icons/hicolor/128x128/apps/org.librefood.Librefood.png \
+  ~/.local/share/icons/hicolor/128x128/apps/org.librefood.Librefood.png
+install -Dm644 data/icons/hicolor/64x64/apps/org.librefood.Librefood.png \
+  ~/.local/share/icons/hicolor/64x64/apps/org.librefood.Librefood.png
+
+update-desktop-database ~/.local/share/applications >/dev/null 2>&1 || true
+gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor >/dev/null 2>&1 || true
+```
+
+Ensure `~/.local/bin` is on your `PATH`. System-wide: use `/usr/local` instead of `~/.local` (with `sudo`). Icon name: `org.librefood.Librefood`.
+
 ## Arch Linux
 
 ```bash
 sudo pacman -S rust gtk4 libadwaita pkgconf gstreamer gst-plugins-base
 # camera (optional): v4l-utils; usermod -aG video $USER  # then re-login
 # phone/libcamera path: libcamera gst-plugin-libcamera pipewire
+# then: cargo build --release && follow Install (launcher + logo) above
 ```
 
 ## Alpine Linux
@@ -30,7 +58,9 @@ sudo apk add build-base cargo glib-dev pango-dev gdk-pixbuf-dev gtk4.0-dev clang
 # camera (phones / CAMSS): see Camera section below
 # USB webcam only: sudo apk add v4l-utils; sudo adduser $USER video  # then re-login
 git clone https://github.com/notfatnotfunny/librefood.git
-cd librefood && cargo build --release && ./target/release/librefood
+cd librefood && cargo build --release
+# then follow Install (launcher + logo) above (same ~/.local paths)
+./target/release/librefood   # or: librefood  after install
 ```
 
 Same list: [`alpine-dependencies.txt`](alpine-dependencies.txt).

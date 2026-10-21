@@ -146,6 +146,9 @@ pub struct AppModel {
     search_pane: SearchPane,
     /// Pane to return to when leaving the product page (mode or hub).
     search_return: SearchPane,
+    /// When a product was opened from History/Favorites, Back returns there
+    /// instead of a Search mode page (never dump onto barcode/EAN).
+    library_return: Option<AppPage>,
     history: HistoryStore,
     favorites: FavoritesStore,
     selected_profile_id: Option<String>,
@@ -170,7 +173,7 @@ impl AppModel {
             .iter()
             .map(|p| {
                 let mark = if p.builtin { "" } else { "★ " };
-                format!("{mark}{} (v{})", p.name, p.version)
+                format!("{mark}{}", p.name)
             })
             .collect();
         self.active_profile_index = self
@@ -239,8 +242,8 @@ impl AppModel {
             return String::new();
         };
         let mut parts = vec![format!(
-            "Profile “{}” (`{}`) v{} · {} pts · Librefood heuristic (not medical advice)",
-            s.profile_name, s.profile_id, s.profile_version, s.score
+            "Profile “{}” (`{}`) · {} pts · Librefood heuristic (not medical advice)",
+            s.profile_name, s.profile_id, s.score
         )];
         if let Some(p) = &self.product {
             if let Some(g) = p.nutriscore_grade {
@@ -529,7 +532,21 @@ fn handle_profiles_event(
 
     match ev {
         ProfilePageEvent::Select(id) => {
-            model.selected_profile_id = Some(id);
+            model.selected_profile_id = Some(id.clone());
+            // Row tap sets the active scoring profile (no separate Select button).
+            if id != model.store.active_id() {
+                match model.store.set_active(&id) {
+                    Ok(()) => {
+                        model.rebuild_profile_lists();
+                        model.profiles_status = String::new();
+                        queue_msg(&sender, Msg::SyncProfileDropdown);
+                        if model.product.is_some() {
+                            queue_msg(&sender, Msg::Rescore);
+                        }
+                    }
+                    Err(e) => model.profiles_status = e,
+                }
+            }
             queue_msg(&sender, Msg::RelabelProfiles);
         }
         ProfilePageEvent::New => {
@@ -573,14 +590,15 @@ fn handle_profiles_event(
             }
         }
         ProfilePageEvent::SetActive => {
+            // Kept for smoke tests; UI no longer exposes a Select/Set-active button.
             let Some(id) = model.selected_profile_id.clone() else {
-                model.profiles_status = "Select a profile first.".into();
+                model.profiles_status = "Choose a profile first.".into();
                 return;
             };
             match model.store.set_active(&id) {
                 Ok(()) => {
                     model.rebuild_profile_lists();
-                    model.profiles_status = format!("Active profile: {id}");
+                    model.profiles_status = String::new();
                     queue_msg(&sender, Msg::RelabelProfiles);
                     queue_msg(&sender, Msg::SyncProfileDropdown);
                     if model.product.is_some() {
@@ -592,7 +610,7 @@ fn handle_profiles_event(
         }
         ProfilePageEvent::Duplicate => {
             let Some(id) = model.selected_profile_id.clone() else {
-                model.profiles_status = "Select a profile first.".into();
+                model.profiles_status = "Choose a profile first.".into();
                 return;
             };
             let default_name = format!(
@@ -621,7 +639,7 @@ fn handle_profiles_event(
         }
         ProfilePageEvent::DuplicateNamed(name) => {
             let Some(id) = model.selected_profile_id.clone() else {
-                model.profiles_status = "Select a profile first.".into();
+                model.profiles_status = "Choose a profile first.".into();
                 return;
             };
             match model.store.duplicate(&id, &name) {
@@ -640,7 +658,7 @@ fn handle_profiles_event(
         }
         ProfilePageEvent::StartEdit => {
             let Some(id) = model.selected_profile_id.clone() else {
-                model.profiles_status = "Select a profile first.".into();
+                model.profiles_status = "Choose a profile first.".into();
                 return;
             };
             let Some(profile) = model.store.get(&id).cloned() else {
@@ -663,7 +681,7 @@ fn handle_profiles_event(
         }
         ProfilePageEvent::Export => {
             let Some(id) = model.selected_profile_id.clone() else {
-                model.profiles_status = "Select a profile first.".into();
+                model.profiles_status = "Choose a profile first.".into();
                 return;
             };
             match model.store.export_json(&id) {
@@ -707,7 +725,7 @@ fn handle_profiles_event(
         },
         ProfilePageEvent::Delete => {
             let Some(id) = model.selected_profile_id.clone() else {
-                model.profiles_status = "Select a profile first.".into();
+                model.profiles_status = "Choose a profile first.".into();
                 return;
             };
             match model.store.delete(&id) {
@@ -1069,8 +1087,8 @@ impl Component for AppModel {
 
                                 gtk::Box {
                                     set_orientation: gtk::Orientation::Horizontal,
-                                    set_width_request: 72,
-                                    set_height_request: 72,
+                                    set_width_request: 96,
+                                    set_height_request: 96,
                                     set_halign: gtk::Align::Center,
                                     set_overflow: gtk::Overflow::Hidden,
                                     add_css_class: "hub-logo-frame",
@@ -1898,7 +1916,7 @@ impl Component for AppModel {
             summary: None,
             last_result: None,
             product_image: None,
-            logo: logo::logo_texture(128),
+            logo: logo::logo_texture(logo::HUB_LOGO_CSS_PX),
             // Quick list only — full open is deferred (avoids init hang / D-Bus lock).
             camera_probe: camera::camera_probe_quick(),
             scanning: false,
@@ -1916,6 +1934,7 @@ impl Component for AppModel {
             page: page_init,
             search_pane: SearchPane::Hub,
             search_return: SearchPane::Hub,
+            library_return: None,
             history: HistoryStore::open_default().unwrap_or_else(|e| {
                 eprintln!("history store: {e}");
                 let dir = std::env::temp_dir().join(format!("lf-hist-{}", std::process::id()));
@@ -1929,7 +1948,7 @@ impl Component for AppModel {
                 FavoritesStore::open(dir.join("favorites.json"))
             }),
             selected_profile_id: None,
-            profiles_status: "Select a profile, then Edit — editor opens full-page.".into(),
+            profiles_status: String::new(),
             editing_profile: false,
             profile_editor: None,
             suppress_profile_dropdown: false,
@@ -1968,6 +1987,8 @@ impl Component for AppModel {
         let widgets = view_output!();
         load_css();
         logo::apply_window_icon(&root);
+        // Re-rasterize hub logo at the real display scale (HiDPI-safe).
+        model.logo = logo::logo_texture_scaled(logo::HUB_LOGO_CSS_PX, root.scale_factor());
         {
             use gtk::accessible::Property;
             widgets
@@ -2227,6 +2248,7 @@ impl Component for AppModel {
                 }
             }
             Msg::PickSearchHit(code) => {
+                self.library_return = None;
                 self.barcode = code;
                 widgets.barcode_entry.set_text(&self.barcode);
                 self.search_hits.clear();
@@ -2244,14 +2266,16 @@ impl Component for AppModel {
                     self.product_image = texture_from_bytes(info.image_bytes.as_deref());
                     self.product = Some(info);
                     self.page = AppPage::Lookup;
-                    // Remember mode page for Back; stay on hub if opened from library.
-                    if !matches!(
-                        self.search_pane,
-                        SearchPane::Camera | SearchPane::Text | SearchPane::Ean
-                    ) {
-                        self.search_return = SearchPane::Hub;
-                    } else {
-                        self.search_return = self.search_pane;
+                    // Remember Search mode for Back. Library opens keep library_return.
+                    if self.library_return.is_none() {
+                        if matches!(
+                            self.search_pane,
+                            SearchPane::Camera | SearchPane::Text | SearchPane::Ean
+                        ) {
+                            self.search_return = self.search_pane;
+                        } else {
+                            self.search_return = SearchPane::Hub;
+                        }
                     }
                     self.search_pane = SearchPane::Product;
                     self.scanning = false;
@@ -2384,8 +2408,8 @@ impl Component for AppModel {
                         ""
                     };
                     lines.push(format!(
-                        "• {} v{} → {} ({}){active}",
-                        p.name, p.version, r.score_display, r.label
+                        "• {} → {} ({}){active}",
+                        p.name, r.score_display, r.label
                     ));
                 }
                 append_explanation(&widgets.explain_list, &lines);
@@ -2407,6 +2431,7 @@ impl Component for AppModel {
                             ctrl.stop.store(true, Ordering::SeqCst);
                         }
                     }
+                    self.library_return = None;
                     self.search_pane = SearchPane::Hub;
                     self.search_return = SearchPane::Hub;
                 }
@@ -2432,6 +2457,7 @@ impl Component for AppModel {
                 }
             }
             Msg::OpenSearchPane(pane) => {
+                self.library_return = None;
                 self.page = AppPage::Lookup;
                 match pane {
                     SearchPane::Hub => {
@@ -2472,17 +2498,24 @@ impl Component for AppModel {
                 match self.search_pane {
                     SearchPane::Hub => {}
                     SearchPane::Product => {
-                        self.search_pane = match self.search_return {
-                            SearchPane::Camera | SearchPane::Text | SearchPane::Ean => {
-                                self.search_return
-                            }
-                            _ => SearchPane::Hub,
-                        };
-                        // Don't auto-restart camera when backing from product.
-                        if self.search_pane == SearchPane::Camera && !self.scanning {
-                            self.status_text =
-                                "Tap Camera on the hub to scan again.".into();
+                        if let Some(ret) = self.library_return.take() {
+                            // History / Favorites → return there (never barcode/EAN).
+                            self.page = ret;
                             self.search_pane = SearchPane::Hub;
+                            self.search_return = SearchPane::Hub;
+                        } else {
+                            self.search_pane = match self.search_return {
+                                SearchPane::Camera | SearchPane::Text | SearchPane::Ean => {
+                                    self.search_return
+                                }
+                                _ => SearchPane::Hub,
+                            };
+                            // Leave Camera mode visible; don't auto-restart scan.
+                            if self.search_pane == SearchPane::Camera && !self.scanning {
+                                self.status_kind = StatusKind::Idle;
+                                self.status_text =
+                                    "Tap Scan on this page to try again.".into();
+                            }
                         }
                     }
                     SearchPane::Camera => {
@@ -2525,8 +2558,14 @@ impl Component for AppModel {
                 );
             }
             Msg::OpenLibraryBarcode(code) => {
+                // Remember History/Favorites so Back returns there — not EAN.
+                self.library_return = match self.page {
+                    AppPage::History | AppPage::Favorites => Some(self.page),
+                    _ => self.library_return,
+                };
                 self.page = AppPage::Lookup;
-                self.search_pane = SearchPane::Ean;
+                // Stay on hub while loading; LookupDone moves to Product.
+                self.search_pane = SearchPane::Hub;
                 self.search_return = SearchPane::Hub;
                 self.barcode = off::normalize_barcode(&code);
                 widgets.barcode_entry.set_text(&self.barcode);
@@ -3068,7 +3107,9 @@ fn load_css() {
             opacity: 0.65;
         }
         .hub-logo-frame {
-            border-radius: 16px;
+            border-radius: 18px;
+            min-width: 96px;
+            min-height: 96px;
         }
         .mode-tile {
             min-height: 48px;
@@ -3262,8 +3303,9 @@ mod window_placement_tests {
 
     #[test]
     fn fajita_1080p_16x9_is_handheld() {
-        // Physical or logical 1920×1080 landscape (OnePlus fajita).
-        assert!(is_handheld_display(1920, 1080, 1, 1));
+        // Plain 1× 1080p is a desktop monitor — not handheld.
+        assert!(!is_handheld_display(1920, 1080, 1, 1));
+        // Hi-DPI phone panels (fajita-class @ scale ≥ 2).
         assert!(is_handheld_display(1920, 1080, 2, 1));
         assert!(is_handheld_display(1080, 1920, 3, 1)); // portrait
         // Logical size after scale (960×540) still handheld via short≤900.

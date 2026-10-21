@@ -70,9 +70,9 @@ fn profile_row_title(mark: &str, name: &str) -> String {
     format!("{mark}  {name}")
 }
 
-fn profile_row_sub(id: &str, version: u32, builtin: bool) -> String {
+fn profile_row_sub(id: &str, builtin: bool) -> String {
     let kind = if builtin { "built-in" } else { "custom" };
-    format!("{id} · v{version} · {kind}")
+    format!("{id} · {kind}")
 }
 
 fn list_has_profile_row(container: &gtk::Box, id: &str) -> bool {
@@ -108,7 +108,7 @@ fn make_profile_row_button(
     title.set_xalign(0.0);
     title.set_wrap(true);
 
-    let sub = gtk::Label::new(Some(&profile_row_sub(&p.id, p.version, p.builtin)));
+    let sub = gtk::Label::new(Some(&profile_row_sub(&p.id, p.builtin)));
     sub.add_css_class("dim-label");
     sub.set_halign(gtk::Align::Start);
     sub.set_xalign(0.0);
@@ -216,7 +216,6 @@ pub fn relabel_profile_list(
             .map(|p| p.name.as_str())
             .unwrap_or(id.as_str());
         let builtin = store.get(&id).map(|p| p.builtin).unwrap_or(false);
-        let version = store.get(&id).map(|p| p.version).unwrap_or(1);
         if let Some(title) = row.first_child().and_then(|c| c.downcast::<gtk::Label>().ok()) {
             title.set_text(&profile_row_title(mark, name));
         }
@@ -225,7 +224,7 @@ pub fn relabel_profile_list(
             .and_then(|c| c.next_sibling())
             .and_then(|c| c.downcast::<gtk::Label>().ok())
         {
-            sub.set_text(&profile_row_sub(&id, version, builtin));
+            sub.set_text(&profile_row_sub(&id, builtin));
         }
         child = next;
     }
@@ -269,13 +268,6 @@ pub fn rebuild_profile_actions(actions: &gtk::Box, emit: &Rc<dyn Fn(ProfilePageE
         "New profile",
         ProfilePageEvent::New,
         &["suggested-action", "profile-action", "profile-action-primary"],
-        emit,
-    ));
-    main.append(&icon_btn(
-        "object-select-symbolic",
-        "Set as active",
-        ProfilePageEvent::SetActive,
-        &["profile-action", "profile-action-secondary"],
         emit,
     ));
     main.append(&icon_btn(

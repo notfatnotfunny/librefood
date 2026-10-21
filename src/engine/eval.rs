@@ -40,6 +40,7 @@ pub struct AppliedCap {
 pub struct ScoreResult {
     pub profile_id: String,
     pub profile_name: String,
+    #[allow(dead_code)] // kept for reproducibility; not shown in UI
     pub profile_version: u32,
     pub score: f64,
     pub score_display: String,

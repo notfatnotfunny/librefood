@@ -230,29 +230,26 @@ pub fn relabel_profile_list(
     }
 }
 
-/// Mount profile actions as a modern vertical list (no FlowBox grid).
+/// Mount profile actions as a compact icon toolbar (tooltips + a11y names).
 pub fn rebuild_profile_actions(actions: &gtk::Box, emit: &Rc<dyn Fn(ProfilePageEvent)>) {
     clear_container(actions);
     actions.set_orientation(gtk::Orientation::Vertical);
-    actions.set_spacing(6);
+    actions.set_spacing(8);
     actions.add_css_class("profile-actions");
 
-    fn action_btn(
+    fn icon_btn(
+        icon: &str,
         label: &str,
         event: ProfilePageEvent,
         classes: &[&str],
         emit: &Rc<dyn Fn(ProfilePageEvent)>,
     ) -> gtk::Button {
-        let btn = gtk::Button::with_label(label);
+        let btn = gtk::Button::from_icon_name(icon);
+        btn.set_tooltip_text(Some(label));
+        btn.update_property(&[gtk::accessible::Property::Label(label)]);
         btn.set_hexpand(true);
         btn.set_halign(gtk::Align::Fill);
-        if let Some(child) = btn.child() {
-            if let Ok(lab) = child.downcast::<gtk::Label>() {
-                lab.set_halign(gtk::Align::Center);
-                lab.set_xalign(0.5);
-                lab.set_justify(gtk::Justification::Center);
-            }
-        }
+        btn.set_valign(gtk::Align::Center);
         for c in classes {
             btn.add_css_class(c);
         }
@@ -261,59 +258,68 @@ pub fn rebuild_profile_actions(actions: &gtk::Box, emit: &Rc<dyn Fn(ProfilePageE
         btn
     }
 
-    // Primary CTA
-    actions.append(&action_btn(
+    // Primary row: create + everyday actions
+    let main = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    main.set_homogeneous(true);
+    main.set_hexpand(true);
+    main.add_css_class("profile-action-row");
+    main.append(&icon_btn(
+        "list-add-symbolic",
         "New profile",
         ProfilePageEvent::New,
         &["suggested-action", "profile-action", "profile-action-primary"],
         emit,
     ));
+    main.append(&icon_btn(
+        "object-select-symbolic",
+        "Set as active",
+        ProfilePageEvent::SetActive,
+        &["profile-action", "profile-action-secondary"],
+        emit,
+    ));
+    main.append(&icon_btn(
+        "document-edit-symbolic",
+        "Edit",
+        ProfilePageEvent::StartEdit,
+        &["profile-action", "profile-action-secondary"],
+        emit,
+    ));
+    main.append(&icon_btn(
+        "edit-copy-symbolic",
+        "Duplicate",
+        ProfilePageEvent::Duplicate,
+        &["profile-action", "profile-action-secondary"],
+        emit,
+    ));
+    actions.append(&main);
 
-    // Core actions — full-width, left-aligned feel via CSS
-    let core: &[(&str, ProfilePageEvent)] = &[
-        ("Set as active", ProfilePageEvent::SetActive),
-        ("Edit", ProfilePageEvent::StartEdit),
-        ("Duplicate", ProfilePageEvent::Duplicate),
-    ];
-    for (label, event) in core {
-        actions.append(&action_btn(
-            label,
-            event.clone(),
-            &["profile-action", "profile-action-secondary"],
-            emit,
-        ));
-    }
-
-    let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
-    sep.add_css_class("profile-action-sep");
-    sep.set_margin_top(4);
-    sep.set_margin_bottom(2);
-    actions.append(&sep);
-
-    // Quiet import/export
-    let io_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    io_row.set_homogeneous(true);
-    io_row.set_hexpand(true);
-    io_row.append(&action_btn(
+    // Secondary row: import / export / delete
+    let io = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    io.set_homogeneous(true);
+    io.set_hexpand(true);
+    io.add_css_class("profile-action-row");
+    io.append(&icon_btn(
+        "document-open-symbolic",
         "Import",
         ProfilePageEvent::Import,
         &["profile-action", "profile-action-quiet", "flat"],
         emit,
     ));
-    io_row.append(&action_btn(
+    io.append(&icon_btn(
+        "document-save-symbolic",
         "Export",
         ProfilePageEvent::Export,
         &["profile-action", "profile-action-quiet", "flat"],
         emit,
     ));
-    actions.append(&io_row);
-
-    actions.append(&action_btn(
+    io.append(&icon_btn(
+        "user-trash-symbolic",
         "Delete",
         ProfilePageEvent::Delete,
         &["profile-action", "profile-action-danger", "flat"],
         emit,
     ));
+    actions.append(&io);
 }
 
 /// Mount a full-page scrollable editor into `body`, sticky Save/Cancel into `footer`.

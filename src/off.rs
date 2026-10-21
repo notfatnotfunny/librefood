@@ -378,6 +378,7 @@ fn lookup_product_once(
 /// Simple OFF text search; returns top hits (barcode + name).
 /// Retries transient OFF failures (esp. HTTP 503) so the user doesn't need
 /// to mash Search.
+#[allow(dead_code)]
 pub fn search_products(query: &str, page_size: u32) -> Result<Vec<SearchHit>, LookupError> {
     search_products_with_progress(query, page_size, |_| {})
 }

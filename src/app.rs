@@ -2797,6 +2797,7 @@ fn texture_from_bytes(bytes: Option<&[u8]>) -> Option<gdk::Texture> {
 }
 
 /// OFF lookup plus boycottisraeli.biz brand enrichment (`boycott_listed` attr).
+#[allow(dead_code)]
 pub fn lookup_product_enriched(code: &str) -> Result<ProductModel, String> {
     lookup_product_enriched_with_progress(code, |_| {})
 }

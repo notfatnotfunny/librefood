@@ -7,6 +7,7 @@
 use crate::boycott;
 use crate::product::{attrs, AttrValue, ProductModel};
 use serde::Deserialize;
+use std::path::PathBuf;
 use std::time::Duration;
 
 const API_BASE: &str = "https://wikirate.org";
@@ -188,12 +189,7 @@ fn find_company(
         "{API_BASE}/Companies.json?filter%5Bname%5D={}&limit=12",
         urlencode(q)
     );
-    if let Ok(key) = std::env::var("WIKIRATE_API_KEY") {
-        if !key.is_empty() {
-            url.push_str("&api_key=");
-            url.push_str(&urlencode(&key));
-        }
-    }
+    append_api_key(&mut url, "&");
     let response = client
         .get(&url)
         .header("Accept", "application/json")
@@ -215,12 +211,7 @@ fn try_company_card(
         return Ok(None);
     }
     let mut url = format!("{API_BASE}/{mark}.json");
-    if let Ok(key) = std::env::var("WIKIRATE_API_KEY") {
-        if !key.is_empty() {
-            url.push_str("?api_key=");
-            url.push_str(&urlencode(&key));
-        }
-    }
+    append_api_key(&mut url, "?");
     let response = client
         .get(&url)
         .header("Accept", "application/json")
@@ -292,12 +283,7 @@ fn metric_score(
     wba_scale: bool,
 ) -> Result<Option<ScoreHit>, String> {
     let mut url = format!("{API_BASE}/{metric}+{company_mark}.json");
-    if let Ok(key) = std::env::var("WIKIRATE_API_KEY") {
-        if !key.is_empty() {
-            url.push_str("?api_key=");
-            url.push_str(&urlencode(&key));
-        }
-    }
+    append_api_key(&mut url, "?");
     let response = client
         .get(&url)
         .header("Accept", "application/json")
@@ -361,11 +347,13 @@ fn metric_score(
 
 fn company_mark(company: &CompanyHit) -> String {
     if let Some(url) = &company.url {
-        if let Some(mark) = url
+        // WikiRate may echo `?api_key=` on `url`; strip query/fragment before the mark.
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        if let Some(mark) = path
             .trim_end_matches('/')
             .rsplit('/')
             .next()
-            .map(|s| s.trim_end_matches(".json"))
+            .map(|s| s.strip_suffix(".json").unwrap_or(s))
             .filter(|s| !s.is_empty())
         {
             return mark.to_string();
@@ -420,6 +408,37 @@ fn http_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| e.to_string())
 }
 
+/// `WIKIRATE_API_KEY` env wins; else `~/.config/librefood/wikirate_api_key` (or `$XDG_CONFIG_HOME`).
+fn api_key() -> Option<String> {
+    if let Ok(key) = std::env::var("WIKIRATE_API_KEY") {
+        let key = key.trim().to_string();
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    let dir = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg).join("librefood")
+    } else {
+        let home = std::env::var("HOME").ok()?;
+        PathBuf::from(home).join(".config/librefood")
+    };
+    let text = std::fs::read_to_string(dir.join("wikirate_api_key")).ok()?;
+    let key = text.trim().to_string();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key)
+    }
+}
+
+fn append_api_key(url: &mut String, sep: &str) {
+    if let Some(key) = api_key() {
+        url.push_str(sep);
+        url.push_str("api_key=");
+        url.push_str(&urlencode(&key));
+    }
+}
+
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -470,6 +489,18 @@ mod tests {
     #[test]
     fn card_mark_spaces_to_underscores() {
         assert_eq!(card_mark("The Coca Cola Company"), "The_Coca_Cola_Company");
+    }
+
+    #[test]
+    fn company_mark_strips_api_key_query() {
+        let hit = CompanyHit {
+            id: Some(8912),
+            name: Some("The Coca Cola Company".into()),
+            url: Some(
+                "https://wikirate.org/The_Coca_Cola_Company.json?api_key=REDACTED".into(),
+            ),
+        };
+        assert_eq!(company_mark(&hit), "The_Coca_Cola_Company");
     }
 
     #[test]

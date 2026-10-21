@@ -1102,8 +1102,12 @@ fn shrink_for_preview(width: u32, height: u32, rgb: &[u8], max_edge: u32) -> (u3
 }
 
 /// `LIBREFOOD_CAMERA_ROTATE=0|90|180|270|auto` — degrees clockwise, or auto.
+/// Env wins; else `~/.config/librefood/camera-rotate` (one line, same values).
 fn env_rotate_degrees() -> Option<u16> {
-    let Ok(raw) = std::env::var("LIBREFOOD_CAMERA_ROTATE") else {
+    let raw = std::env::var("LIBREFOOD_CAMERA_ROTATE")
+        .ok()
+        .or_else(load_saved_rotate);
+    let Some(raw) = raw else {
         return None;
     };
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -1113,9 +1117,25 @@ fn env_rotate_degrees() -> Option<u16> {
         "180" => Some(180),
         "270" => Some(270),
         other => {
-            cam_debug(format!("ignore invalid LIBREFOOD_CAMERA_ROTATE={other:?}"));
+            cam_debug(format!("ignore invalid camera rotate={other:?}"));
             None
         }
+    }
+}
+
+fn load_saved_rotate() -> Option<String> {
+    let dir = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        std::path::PathBuf::from(xdg).join("librefood")
+    } else {
+        let home = std::env::var("HOME").ok()?;
+        std::path::PathBuf::from(home).join(".config/librefood")
+    };
+    let text = std::fs::read_to_string(dir.join("camera-rotate")).ok()?;
+    let v = text.trim().to_string();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
     }
 }
 

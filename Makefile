@@ -17,12 +17,19 @@ APPID   := org.librefood.Librefood
 BINARY  := target/release/librefood
 DESKTOP := data/$(APPID).desktop
 
-.PHONY: all build install uninstall clean
+.PHONY: all build install uninstall clean set-rotate
 
 all: build
 
 build:
 	cargo build --release
+
+# Persist preview rotate for all launches (drawer + CLI). Example: make set-rotate ANGLE=90
+ANGLE ?= 90
+set-rotate:
+	mkdir -p $(HOME)/.config/librefood
+	printf '%s\n' "$(ANGLE)" > $(HOME)/.config/librefood/camera-rotate
+	@echo "Wrote $(HOME)/.config/librefood/camera-rotate → $(ANGLE) (env LIBREFOOD_CAMERA_ROTATE still wins)"
 
 install: build
 	install -Dm755 $(BINARY) $(BINDIR)/librefood

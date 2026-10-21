@@ -1984,18 +1984,22 @@ impl Component for AppModel {
                 .update_property(&[Property::Label("Profiles")]);
         }
         apply_window_placement(&root);
+        // Ensure the window is mapped and raised (important on Wayland/Hyprland).
+        root.present();
         // Wayland/Phosh often ignore maximize until the surface is mapped —
         // re-apply on map and once shortly after (same as before).
         {
             let win = root.clone();
             win.connect_map(|w| {
                 apply_window_placement(w);
+                w.present();
             });
             let win2 = root.clone();
             gtk::glib::timeout_add_local_once(
                 std::time::Duration::from_millis(150),
                 move || {
                     apply_window_placement(&win2);
+                    win2.present();
                 },
             );
         }
@@ -2872,20 +2876,18 @@ fn is_mobile_desktop_env() -> bool {
 /// phones for fullscreen; Phosh fills the workarea when the window is maximized.
 fn is_handheld_display(mon_w: i32, mon_h: i32, scale: i32, n_monitors: u32) -> bool {
     let short = mon_w.min(mon_h);
-    let long = mon_w.max(mon_h);
     let single = n_monitors <= 1;
+    // Phosh / mobile shells — always fill the workarea.
     if is_mobile_desktop_env() {
         return true;
     }
-    // Classic small phones / very short workareas
+    // Classic small phones / very short workareas (not a typical desktop 1080p).
     if short <= 900 || mon_h <= 700 {
         return true;
     }
-    // 1080p-class single panel (fajita landscape 1920×1080 or portrait 1080×1920).
-    // Desktop 1080p users: set LIBREFOOD_NO_FULLSCREEN=1 to keep a floating window.
-    if single && short <= 1080 && long <= 2400 {
-        return true;
-    }
+    // Hi-DPI phone panels (e.g. fajita @ scale 2). Do **not** treat plain
+    // 1080p/1440p desktop monitors as handheld — that maximized the window in
+    // a way that looked like “doesn't open” on some Wayland compositors.
     if single && short <= 1080 && scale >= 2 {
         return true;
     }
@@ -3085,9 +3087,7 @@ fn load_css() {
         .product-image {
             border-radius: 12px;
             min-width: 72px;
-            max-width: 88px;
             min-height: 72px;
-            max-height: 88px;
             background: alpha(@card_fg_color, 0.06);
         }
         .score-number {
@@ -3205,12 +3205,6 @@ fn load_css() {
         .profiles-actions-bar {
             padding-top: 10px;
             border-top: 1px solid alpha(@card_fg_color, 0.1);
-        }
-        .profile-actions {
-            spacing: 8px;
-        }
-        .profile-action-row {
-            spacing: 8px;
         }
         .profile-action {
             min-height: 48px;

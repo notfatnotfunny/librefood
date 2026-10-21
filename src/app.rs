@@ -3209,15 +3209,19 @@ fn load_css() {
             border-top: 1px solid alpha(@card_fg_color, 0.1);
         }
         .profile-actions {
-            spacing: 6px;
+            spacing: 8px;
+        }
+        .profile-action-row {
+            spacing: 8px;
         }
         .profile-action {
-            min-height: 44px;
-            border-radius: 12px;
-            font-weight: 600;
+            min-height: 48px;
+            min-width: 48px;
+            border-radius: 14px;
+            padding: 10px;
         }
         .profile-action-primary {
-            min-height: 46px;
+            min-height: 48px;
         }
         .profile-action-secondary {
             background-color: alpha(@window_fg_color, 0.06);
@@ -3226,19 +3230,15 @@ fn load_css() {
             background-color: alpha(@window_fg_color, 0.10);
         }
         .profile-action-quiet {
-            font-weight: 500;
-            min-height: 40px;
-            opacity: 0.9;
+            min-height: 44px;
+            opacity: 0.92;
         }
         .profile-action-danger {
-            font-weight: 500;
-            min-height: 40px;
+            min-height: 44px;
             color: #c62828;
         }
-        .profile-action-sep {
-            opacity: 0.35;
-            margin-left: 2px;
-            margin-right: 2px;
+        .profile-action-danger:hover {
+            background-color: alpha(#c62828, 0.12);
         }
         .profiles-editor-footer {
             padding-top: 8px;

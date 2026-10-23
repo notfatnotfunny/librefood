@@ -239,26 +239,10 @@ impl AppModel {
         }
     }
 
-    fn missing_caption(&self) -> String {
-        match &self.summary {
-            Some(s) if !s.missing.is_empty() => {
-                format!("Missing / unavailable: {}", s.missing.join(", "))
-            }
-            _ => String::new(),
-        }
-    }
-
-    fn has_negatives(&self) -> bool {
+    fn has_factors(&self) -> bool {
         self.summary
             .as_ref()
-            .map(|s| !s.negatives.is_empty())
-            .unwrap_or(false)
-    }
-
-    fn has_positives(&self) -> bool {
-        self.summary
-            .as_ref()
-            .map(|s| !s.positives.is_empty())
+            .map(|s| !s.negatives.is_empty() || !s.positives.is_empty())
             .unwrap_or(false)
     }
 
@@ -283,13 +267,6 @@ impl AppModel {
         match self.width_class {
             UiWidth::Compact => gtk::Orientation::Vertical,
             UiWidth::Medium | UiWidth::Wide => gtk::Orientation::Horizontal,
-        }
-    }
-
-    fn factors_orientation(&self) -> gtk::Orientation {
-        match self.width_class {
-            UiWidth::Wide => gtk::Orientation::Horizontal,
-            _ => gtk::Orientation::Vertical,
         }
     }
 
@@ -775,7 +752,7 @@ fn rebuild_history_list(
             .filter(|e| {
                 e.name.to_ascii_lowercase().contains(&q)
                     || e.barcode.to_ascii_lowercase().contains(&q)
-                    || e.subtitle().to_ascii_lowercase().contains(&q)
+                    || e.brand_label().to_ascii_lowercase().contains(&q)
             })
             .collect()
     };
@@ -913,6 +890,7 @@ fn library_entry_row(
 ) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.set_hexpand(true);
+    row.set_valign(gtk::Align::Center);
     row.add_css_class("library-row");
 
     let btn = gtk::Button::new();
@@ -920,22 +898,55 @@ fn library_entry_row(
     btn.add_css_class("flat");
     let inner = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     inner.set_hexpand(true);
+    inner.set_valign(gtk::Align::Center);
     inner.append(&library_thumb(entry));
 
-    let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let col = gtk::Box::new(gtk::Orientation::Vertical, 1);
     col.set_hexpand(true);
+    col.set_valign(gtk::Align::Center);
+
     let title = gtk::Label::new(Some(&entry.name));
     title.add_css_class("factor-title");
     title.set_halign(gtk::Align::Start);
     title.set_xalign(0.0);
-    title.set_wrap(true);
-    let sub = gtk::Label::new(Some(&entry.subtitle()));
-    sub.add_css_class("factor-detail");
-    sub.set_halign(gtk::Align::Start);
-    sub.set_xalign(0.0);
-    sub.set_wrap(true);
-    col.append(&title);
-    col.append(&sub);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    title.set_single_line_mode(true);
+
+    let brand = entry.brand_label();
+    if !brand.is_empty() {
+        let brand_lab = gtk::Label::new(Some(&brand));
+        brand_lab.add_css_class("factor-detail");
+        brand_lab.set_halign(gtk::Align::Start);
+        brand_lab.set_xalign(0.0);
+        brand_lab.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        brand_lab.set_single_line_mode(true);
+        col.append(&title);
+        col.append(&brand_lab);
+    } else {
+        col.append(&title);
+    }
+
+    let meta = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    meta.set_halign(gtk::Align::Start);
+    let dot = gtk::Label::new(Some("●"));
+    let (c1, c2) = match entry.score_status() {
+        FactorStatus::Good => ("status-dot", "dot-good"),
+        FactorStatus::Mediocre => ("status-dot", "dot-mediocre"),
+        FactorStatus::Poor => ("status-dot", "dot-poor"),
+    };
+    dot.set_css_classes(&[c1, c2]);
+    meta.append(&dot);
+    let score = entry.score_display.clone().unwrap_or_else(|| "—".into());
+    let score_lab = gtk::Label::new(Some(&score));
+    score_lab.add_css_class("library-score");
+    score_lab.set_halign(gtk::Align::Start);
+    meta.append(&score_lab);
+    let date_lab = gtk::Label::new(Some(&entry.date_label()));
+    date_lab.add_css_class("factor-detail");
+    date_lab.set_halign(gtk::Align::Start);
+    meta.append(&date_lab);
+    col.append(&meta);
+
     inner.append(&col);
     btn.set_child(Some(&inner));
 
@@ -958,35 +969,24 @@ fn library_entry_row(
     row
 }
 
-fn append_factor_rows(container: &gtk::Box, rows: &[score::FactorRow]) {
+fn append_factor_rows(container: &gtk::Box, rows: &[&score::FactorRow]) {
     clear_box(container);
     for row in rows {
+        let block = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        block.set_hexpand(true);
+        block.add_css_class("factor-row");
+
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         line.set_hexpand(true);
-        line.add_css_class("factor-row");
 
         line.append(&crate::stat_icons::image_for_attribute(&row.attribute));
-
-        let text_col = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        text_col.set_hexpand(true);
-        text_col.set_halign(gtk::Align::Start);
 
         let title = gtk::Label::new(Some(&row.title));
         title.add_css_class("factor-title");
         title.set_halign(gtk::Align::Start);
+        title.set_hexpand(true);
         title.set_xalign(0.0);
-
-        let detail = gtk::Label::new(Some(&row.detail));
-        detail.add_css_class("factor-detail");
-        detail.set_halign(gtk::Align::Start);
-        detail.set_wrap(true);
-        detail.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        detail.set_max_width_chars(36);
-        detail.set_hexpand(true);
-        detail.set_xalign(0.0);
-
-        text_col.append(&title);
-        text_col.append(&detail);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
         let value = gtk::Label::new(Some(&row.value_label));
         value.add_css_class("factor-value");
@@ -1005,11 +1005,50 @@ fn append_factor_rows(container: &gtk::Box, rows: &[score::FactorRow]) {
         };
         dot.set_css_classes(&[c1, c2]);
 
-        line.append(&text_col);
+        line.append(&title);
         line.append(&value);
         line.append(&delta);
         line.append(&dot);
-        container.append(&line);
+
+        let detail_text = row.detail.trim().to_string();
+        if !detail_text.is_empty() {
+            let detail = gtk::Label::new(Some(&detail_text));
+            detail.add_css_class("factor-detail");
+            detail.set_halign(gtk::Align::Start);
+            detail.set_wrap(true);
+            detail.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            detail.set_max_width_chars(40);
+            detail.set_xalign(0.0);
+            detail.set_selectable(true);
+            detail.set_visible(false);
+            detail.set_margin_start(28);
+
+            let expand = gtk::ToggleButton::new();
+            expand.set_icon_name("pan-end-symbolic");
+            expand.set_tooltip_text(Some("Show source / details"));
+            expand.add_css_class("flat");
+            expand.add_css_class("factor-expand");
+            expand.set_valign(gtk::Align::Center);
+            {
+                let detail = detail.clone();
+                expand.connect_toggled(move |btn| {
+                    let open = btn.is_active();
+                    detail.set_visible(open);
+                    btn.set_icon_name(if open {
+                        "pan-down-symbolic"
+                    } else {
+                        "pan-end-symbolic"
+                    });
+                });
+            }
+            line.append(&expand);
+            block.append(&line);
+            block.append(&detail);
+        } else {
+            block.append(&line);
+        }
+
+        container.append(&block);
     }
 }
 
@@ -1571,19 +1610,6 @@ impl Component for AppModel {
                                 },
                             },
 
-                            gtk::Label {
-                                #[watch]
-                                set_label: &model.missing_caption(),
-                                add_css_class: "missing-label",
-                                set_halign: gtk::Align::Start,
-                                set_wrap: true,
-                                set_wrap_mode: gtk::pango::WrapMode::WordChar,
-                                set_max_width_chars: 40,
-                                set_xalign: 0.0,
-                                #[watch]
-                                set_visible: !model.missing_caption().is_empty(),
-                            },
-
                             gtk::Box {
                                 #[watch]
                                 set_orientation: model.input_orientation(),
@@ -1608,48 +1634,13 @@ impl Component for AppModel {
                                 },
                             },
 
+                            #[name = "factors_list"]
                             gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 0,
+                                set_hexpand: true,
                                 #[watch]
-                                set_orientation: model.factors_orientation(),
-                                set_spacing: 18,
-
-                                gtk::Box {
-                                    set_orientation: gtk::Orientation::Vertical,
-                                    set_spacing: 0,
-                                    set_hexpand: true,
-                                    #[watch]
-                                    set_visible: model.has_negatives(),
-                                    gtk::Label {
-                                        set_label: "Negatives",
-                                        add_css_class: "section-title",
-                                        set_halign: gtk::Align::Start,
-                                        set_xalign: 0.0,
-                                    },
-                                    #[name = "negatives_list"]
-                                    gtk::Box {
-                                        set_orientation: gtk::Orientation::Vertical,
-                                        set_spacing: 0,
-                                    },
-                                },
-
-                                gtk::Box {
-                                    set_orientation: gtk::Orientation::Vertical,
-                                    set_spacing: 0,
-                                    set_hexpand: true,
-                                    #[watch]
-                                    set_visible: model.has_positives(),
-                                    gtk::Label {
-                                        set_label: "Positives",
-                                        add_css_class: "section-title",
-                                        set_halign: gtk::Align::Start,
-                                        set_xalign: 0.0,
-                                    },
-                                    #[name = "positives_list"]
-                                    gtk::Box {
-                                        set_orientation: gtk::Orientation::Vertical,
-                                        set_spacing: 0,
-                                    },
-                                },
+                                set_visible: model.has_factors(),
                             },
                         },
                     },
@@ -2293,8 +2284,7 @@ impl Component for AppModel {
                             "Product found — {} ({}) via “{}”.",
                             s.score_display, s.label, s.profile_name
                         );
-                        append_factor_rows(&widgets.negatives_list, &s.negatives);
-                        append_factor_rows(&widgets.positives_list, &s.positives);
+                        append_factor_rows(&widgets.factors_list, &s.factors());
                     }
                 }
                 Err(msg) => {
@@ -2385,8 +2375,7 @@ impl Component for AppModel {
                         "Rescored — {} ({}) via “{}”.",
                         s.score_display, s.label, s.profile_name
                     );
-                    append_factor_rows(&widgets.negatives_list, &s.negatives);
-                    append_factor_rows(&widgets.positives_list, &s.positives);
+                    append_factor_rows(&widgets.factors_list, &s.factors());
                 }
             }
             Msg::ShowPage(page) => {
@@ -2567,8 +2556,7 @@ impl Component for AppModel {
                             "{} ({}) — opened offline from library.",
                             s.score_display, s.label
                         );
-                        append_factor_rows(&widgets.negatives_list, &s.negatives);
-                        append_factor_rows(&widgets.positives_list, &s.positives);
+                        append_factor_rows(&widgets.factors_list, &s.factors());
                     }
                 } else {
                     self.page = AppPage::Lookup;
@@ -2845,8 +2833,7 @@ impl Component for AppModel {
 }
 
 fn clear_lists(widgets: &AppModelWidgets) {
-    clear_box(&widgets.negatives_list);
-    clear_box(&widgets.positives_list);
+    clear_box(&widgets.factors_list);
     clear_box(&widgets.search_hits);
 }
 
@@ -3263,8 +3250,17 @@ fn load_css() {
             opacity: 0.75;
         }
         .library-row {
-            padding: 8px 0;
+            padding: 4px 0;
             border-bottom: 1px solid alpha(@card_fg_color, 0.08);
+        }
+        .library-score {
+            font-weight: 650;
+            font-size: 0.9rem;
+        }
+        .factor-expand {
+            min-width: 28px;
+            min-height: 28px;
+            padding: 0;
         }
         .profile-row {
             padding: 10px 8px;

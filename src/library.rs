@@ -44,20 +44,25 @@ impl LibraryEntry {
         }
     }
 
-    pub fn subtitle(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(b) = &self.brand {
-            parts.push(b.clone());
+    pub fn brand_label(&self) -> String {
+        self.brand.clone().unwrap_or_default()
+    }
+
+    pub fn date_label(&self) -> String {
+        format_timestamp(self.timestamp)
+    }
+
+    /// Traffic-light status inferred from stored score label.
+    pub fn score_status(&self) -> crate::score::FactorStatus {
+        use crate::score::FactorStatus;
+        match self.score_label.as_deref().unwrap_or("").to_ascii_lowercase().as_str() {
+            s if s.contains("excellent") || s.contains("good") => FactorStatus::Good,
+            s if s.contains("mediocre") || s.contains("fair") || s.contains("ok") => {
+                FactorStatus::Mediocre
+            }
+            s if s.contains("poor") || s.contains("bad") => FactorStatus::Poor,
+            _ => FactorStatus::Mediocre,
         }
-        parts.push(self.barcode.clone());
-        if let (Some(score), Some(label)) = (&self.score_display, &self.score_label) {
-            parts.push(format!("{score} ({label})"));
-        }
-        if let Some(p) = &self.profile_name {
-            parts.push(p.clone());
-        }
-        parts.push(format_timestamp(self.timestamp));
-        parts.join(" · ")
     }
 
     /// Cached product usable for the product page without a network round-trip.

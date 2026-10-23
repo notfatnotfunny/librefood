@@ -44,7 +44,18 @@ pub struct ScoreSummary {
     pub positives: Vec<FactorRow>,
     #[allow(dead_code)] // kept for potential debug export; not shown on product page
     pub explanation_lines: Vec<String>,
+    #[allow(dead_code)]
     pub missing: Vec<String>,
+}
+
+impl ScoreSummary {
+    /// Unified factor list (negatives first, then positives) — no section headers in UI.
+    pub fn factors(&self) -> Vec<&FactorRow> {
+        self.negatives
+            .iter()
+            .chain(self.positives.iter())
+            .collect()
+    }
 }
 
 pub fn summary_from_result(result: &ScoreResult) -> ScoreSummary {

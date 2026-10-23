@@ -234,7 +234,7 @@ pub fn relabel_profile_list(
 pub fn rebuild_profile_actions(actions: &gtk::Box, emit: &Rc<dyn Fn(ProfilePageEvent)>) {
     clear_container(actions);
     actions.set_orientation(gtk::Orientation::Vertical);
-    actions.set_spacing(8);
+    actions.set_spacing(6);
     actions.add_css_class("profile-actions");
 
     fn icon_btn(

@@ -8,10 +8,10 @@ Scoring details: [`docs/scoring-engine.md`](docs/scoring-engine.md).
 
 ```bash
 make
-make install
+sudo make install
 ```
 
-Installs the binary, `.desktop` launcher, and logo icons to `~/.local` (override with `PREFIX=/usr/local`). Ensure `~/.local/bin` is on your `PATH`. Uninstall: `make uninstall`.
+Installs to `/usr/bin/librefood`, `/usr/share/applications/org.librefood.Librefood.desktop`, and hicolor icons under `/usr/share/icons/hicolor/…`. Override with `PREFIX=` / `DESTDIR=`. Uninstall: `sudo make uninstall`.
 
 Optional: `librefood --barcode 3017620422003` or `--page profiles|history|favorites`.
 

@@ -62,6 +62,7 @@ pub enum Msg {
     OpenLibraryBarcode(String),
     ClearHistory,
     HistoryFilterChanged(String),
+    RemoveHistory(String),
     RemoveFavorite(String),
 }
 
@@ -235,29 +236,6 @@ impl AppModel {
             Some(FactorStatus::Mediocre) => ["score-dot", "score-dot-mediocre"],
             Some(FactorStatus::Poor) | None => ["score-dot", "score-dot-poor"],
         }
-    }
-
-    fn profile_caption(&self) -> String {
-        let Some(s) = &self.summary else {
-            return String::new();
-        };
-        let mut parts = vec![format!(
-            "Profile “{}” (`{}`) · {} pts · Librefood heuristic (not medical advice)",
-            s.profile_name, s.profile_id, s.score
-        )];
-        if let Some(p) = &self.product {
-            if let Some(g) = p.nutriscore_grade {
-                parts.push(format!(
-                    "OFF Nutri-Score {} (source data)",
-                    g.to_ascii_uppercase()
-                ));
-            }
-            parts.push(format!("Barcode {}", p.barcode));
-            if let Some(q) = &p.quantity {
-                parts.push(q.clone());
-            }
-        }
-        parts.join(" · ")
     }
 
     fn missing_caption(&self) -> String {
@@ -843,8 +821,30 @@ fn rebuild_history_list(
         btn.connect_clicked(move |_| {
             sender2.input(Msg::OpenLibraryBarcode(code.clone()));
         });
+
+        let remove = gtk::Button::with_label("Remove");
+        remove.add_css_class("flat");
+        let code2 = entry.barcode.clone();
+        let sender3 = sender.clone();
+        remove.connect_clicked(move |_| {
+            sender3.input(Msg::RemoveHistory(code2.clone()));
+        });
+
         row.append(&btn);
+        row.append(&remove);
         container.append(&row);
+    }
+
+    if !entries.is_empty() {
+        let clear = gtk::Button::with_label("Clear history");
+        clear.add_css_class("destructive-action");
+        clear.set_halign(gtk::Align::Start);
+        clear.set_margin_top(12);
+        let sender4 = sender.clone();
+        clear.connect_clicked(move |_| {
+            sender4.input(Msg::ClearHistory);
+        });
+        container.append(&clear);
     }
 }
 
@@ -957,21 +957,6 @@ fn append_factor_rows(container: &gtk::Box, rows: &[score::FactorRow]) {
         line.append(&delta);
         line.append(&dot);
         container.append(&line);
-    }
-}
-
-fn append_explanation(container: &gtk::Box, lines: &[String]) {
-    clear_box(container);
-    for line in lines {
-        let lab = gtk::Label::new(Some(line));
-        lab.add_css_class("explain-line");
-        lab.set_halign(gtk::Align::Start);
-        lab.set_wrap(true);
-        lab.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        lab.set_max_width_chars(40);
-        lab.set_xalign(0.0);
-        lab.set_selectable(true);
-        container.append(&lab);
     }
 }
 
@@ -1535,17 +1520,6 @@ impl Component for AppModel {
 
                             gtk::Label {
                                 #[watch]
-                                set_label: &model.profile_caption(),
-                                add_css_class: "dim-label",
-                                set_halign: gtk::Align::Start,
-                                set_wrap: true,
-                                set_wrap_mode: gtk::pango::WrapMode::WordChar,
-                                set_max_width_chars: 40,
-                                set_xalign: 0.0,
-                                set_selectable: true,
-                            },
-                            gtk::Label {
-                                #[watch]
                                 set_label: &model.missing_caption(),
                                 add_css_class: "missing-label",
                                 set_halign: gtk::Align::Start,
@@ -1633,19 +1607,6 @@ impl Component for AppModel {
                                     },
                                 },
                             },
-
-                            gtk::Label {
-                                set_label: "Calculation steps",
-                                add_css_class: "section-title",
-                                set_halign: gtk::Align::Start,
-                                set_xalign: 0.0,
-                            },
-                            #[name = "explain_list"]
-                            gtk::Box {
-                                set_orientation: gtk::Orientation::Vertical,
-                                set_spacing: 4,
-                                add_css_class: "explain-panel",
-                            },
                         },
                     },
                 },
@@ -1672,14 +1633,6 @@ impl Component for AppModel {
                             set_placeholder_text: Some("Search history…"),
                             connect_changed[sender] => move |entry| {
                                 sender.input(Msg::HistoryFilterChanged(entry.text().to_string()));
-                            },
-                        },
-                        gtk::Button {
-                            set_label: "Clear history",
-                            add_css_class: "destructive-action",
-                            set_halign: gtk::Align::Start,
-                            connect_clicked[sender] => move |_| {
-                                sender.input(Msg::ClearHistory);
                             },
                         },
                         #[name = "history_list"]
@@ -1757,16 +1710,16 @@ impl Component for AppModel {
 
                     gtk::Box {
                         set_orientation: gtk::Orientation::Vertical,
-                        set_spacing: 8,
-                        set_margin_start: 16,
-                        set_margin_end: 16,
-                        set_margin_bottom: 16,
+                        set_spacing: 4,
+                        set_margin_start: 12,
+                        set_margin_end: 12,
+                        set_margin_bottom: 2,
                         add_css_class: "profiles-actions-bar",
 
                         #[name = "profiles_actions"]
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
-                            set_spacing: 8,
+                            set_spacing: 6,
                         },
                         gtk::Label {
                             #[watch]
@@ -1775,6 +1728,8 @@ impl Component for AppModel {
                             set_halign: gtk::Align::Start,
                             set_wrap: true,
                             set_xalign: 0.0,
+                            #[watch]
+                            set_visible: !model.profiles_status.is_empty(),
                         },
                     },
                 },
@@ -2295,7 +2250,6 @@ impl Component for AppModel {
                         );
                         append_factor_rows(&widgets.negatives_list, &s.negatives);
                         append_factor_rows(&widgets.positives_list, &s.positives);
-                        append_explanation(&widgets.explain_list, &s.explanation_lines);
                     }
                 }
                 Err(msg) => {
@@ -2388,7 +2342,6 @@ impl Component for AppModel {
                     );
                     append_factor_rows(&widgets.negatives_list, &s.negatives);
                     append_factor_rows(&widgets.positives_list, &s.positives);
-                    append_explanation(&widgets.explain_list, &s.explanation_lines);
                 }
             }
             Msg::CompareProfiles => {
@@ -2397,9 +2350,7 @@ impl Component for AppModel {
                     self.update_view(widgets, sender);
                     return;
                 };
-                let mut lines = vec![
-                    "Same product under each scoring profile (source OFF data unchanged):".into(),
-                ];
+                let mut lines = Vec::new();
                 for p in self.store.list() {
                     let r = engine::evaluate(product, p);
                     let active = if p.id == self.store.active_id() {
@@ -2408,12 +2359,12 @@ impl Component for AppModel {
                         ""
                     };
                     lines.push(format!(
-                        "• {} → {} ({}){active}",
+                        "{} → {} ({}){active}",
                         p.name, r.score_display, r.label
                     ));
                 }
-                append_explanation(&widgets.explain_list, &lines);
-                self.status_text = "Compared all profiles on the current product.".into();
+                self.status_kind = StatusKind::Success;
+                self.status_text = format!("Compare: {}", lines.join(" · "));
             }
             Msg::ShowPage(page) => {
                 if page != AppPage::Profiles {
@@ -2563,15 +2514,48 @@ impl Component for AppModel {
                     AppPage::History | AppPage::Favorites => Some(self.page),
                     _ => self.library_return,
                 };
-                self.page = AppPage::Lookup;
-                // Stay on hub while loading; LookupDone moves to Product.
-                self.search_pane = SearchPane::Hub;
-                self.search_return = SearchPane::Hub;
-                self.barcode = off::normalize_barcode(&code);
+                let code = off::normalize_barcode(&code);
+                self.barcode = code.clone();
                 widgets.barcode_entry.set_text(&self.barcode);
-                // Lookup sets Loading / status; don't pre-set or it used to
-                // trip a Loading guard and never start the request.
-                queue_msg(&sender, Msg::Lookup);
+
+                // Prefer cached product from History/Favorites — no second API call.
+                let cached = self
+                    .history
+                    .find(&code)
+                    .and_then(|e| e.cached_product().cloned())
+                    .or_else(|| {
+                        self.favorites
+                            .find(&code)
+                            .and_then(|e| e.cached_product().cloned())
+                    });
+
+                if let Some(info) = cached {
+                    self.page = AppPage::Lookup;
+                    self.search_pane = SearchPane::Product;
+                    self.search_return = SearchPane::Hub;
+                    self.status_kind = StatusKind::Success;
+                    self.product_image = texture_from_bytes(info.image_bytes.as_deref());
+                    self.product = Some(info);
+                    self.scanning = false;
+                    self.preview = None;
+                    self.rescore();
+                    if let Some(s) = &self.summary {
+                        self.status_text = format!(
+                            "{} ({}) — opened offline from library.",
+                            s.score_display, s.label
+                        );
+                        append_factor_rows(&widgets.negatives_list, &s.negatives);
+                        append_factor_rows(&widgets.positives_list, &s.positives);
+                    }
+                } else {
+                    self.page = AppPage::Lookup;
+                    // Stay on hub while loading; LookupDone moves to Product.
+                    self.search_pane = SearchPane::Hub;
+                    self.search_return = SearchPane::Hub;
+                    // Lookup sets Loading / status; don't pre-set or it used to
+                    // trip a Loading guard and never start the request.
+                    queue_msg(&sender, Msg::Lookup);
+                }
             }
             Msg::ClearHistory => {
                 if let Err(e) = self.history.clear() {
@@ -2590,6 +2574,19 @@ impl Component for AppModel {
             }
             Msg::HistoryFilterChanged(text) => {
                 self.history_filter = text;
+                rebuild_history_list(
+                    &widgets.history_list,
+                    self.history.entries(),
+                    &self.history_filter,
+                    &sender,
+                );
+            }
+            Msg::RemoveHistory(code) => {
+                if let Err(e) = self.history.remove(&code) {
+                    self.status_text = format!("Could not remove history item: {e}");
+                } else {
+                    self.status_text = "Removed from history.".into();
+                }
                 rebuild_history_list(
                     &widgets.history_list,
                     self.history.entries(),
@@ -2827,7 +2824,6 @@ impl Component for AppModel {
 fn clear_lists(widgets: &AppModelWidgets) {
     clear_box(&widgets.negatives_list);
     clear_box(&widgets.positives_list);
-    clear_box(&widgets.explain_list);
     clear_box(&widgets.search_hits);
 }
 
@@ -3245,14 +3241,15 @@ fn load_css() {
             border-radius: 10px;
         }
         .profiles-actions-bar {
-            padding-top: 10px;
+            padding-top: 4px;
+            padding-bottom: 0;
             border-top: 1px solid alpha(@card_fg_color, 0.1);
         }
         .profile-action {
-            min-height: 48px;
-            min-width: 48px;
-            border-radius: 14px;
-            padding: 10px;
+            min-height: 44px;
+            min-width: 44px;
+            border-radius: 12px;
+            padding: 6px;
         }
         .profile-action-primary {
             min-height: 48px;

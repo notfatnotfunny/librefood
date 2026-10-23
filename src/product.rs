@@ -67,7 +67,12 @@ pub struct ProductModel {
     pub brand_primary: Option<String>,
     pub quantity: Option<String>,
     pub image_url: Option<String>,
-    #[serde(skip)]
+    /// Cached image for offline History/Favorites (base64 in JSON).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "opt_bytes_b64"
+    )]
     pub image_bytes: Option<Vec<u8>>,
     /// Nutri-Score letter when published by OFF (source data, not a Librefood score).
     pub nutriscore_grade: Option<char>,
@@ -106,5 +111,113 @@ pub fn nutriscore_ordinal(grade: char) -> Option<f64> {
         'd' => Some(2.0),
         'e' => Some(1.0),
         _ => None,
+    }
+}
+
+/// Compact base64 for optional `image_bytes` in History/Favorites JSON.
+mod opt_bytes_b64 {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(bytes) => encode(bytes).serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt = Option::<String>::deserialize(deserializer)?;
+        match opt {
+            None => Ok(None),
+            Some(s) if s.is_empty() => Ok(None),
+            Some(s) => decode(&s)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    fn encode(data: &[u8]) -> String {
+        let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+        for chunk in data.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+            let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+            let n = (b0 << 16) | (b1 << 8) | b2;
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(TABLE[((n >> 6) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+            if chunk.len() > 2 {
+                out.push(TABLE[(n & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+        out
+    }
+
+    fn decode(s: &str) -> Result<Vec<u8>, &'static str> {
+        let bytes = s.as_bytes();
+        if bytes.len() % 4 != 0 {
+            return Err("invalid base64 length");
+        }
+        let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+        for chunk in bytes.chunks(4) {
+            let mut n = 0u32;
+            let mut pad = 0u32;
+            for (i, &c) in chunk.iter().enumerate() {
+                let v = match c {
+                    b'A'..=b'Z' => c - b'A',
+                    b'a'..=b'z' => c - b'a' + 26,
+                    b'0'..=b'9' => c - b'0' + 52,
+                    b'+' => 62,
+                    b'/' => 63,
+                    b'=' => {
+                        pad += 1;
+                        0
+                    }
+                    _ => return Err("invalid base64 char"),
+                };
+                if c != b'=' && pad > 0 {
+                    return Err("invalid base64 padding");
+                }
+                n |= (v as u32) << (18 - 6 * i as u32);
+            }
+            out.push(((n >> 16) & 0xff) as u8);
+            if pad < 2 {
+                out.push(((n >> 8) & 0xff) as u8);
+            }
+            if pad < 1 {
+                out.push((n & 0xff) as u8);
+            }
+        }
+        Ok(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn roundtrip() {
+            let samples: &[&[u8]] = &[b"", b"f", b"fo", b"foo", b"foobar", &[0, 1, 2, 255]];
+            for s in samples {
+                let enc = encode(s);
+                let dec = decode(&enc).unwrap();
+                assert_eq!(&dec, s);
+            }
+        }
     }
 }

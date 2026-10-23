@@ -31,6 +31,7 @@ pub struct FactorRow {
 
 #[derive(Debug, Clone)]
 pub struct ScoreSummary {
+    #[allow(dead_code)]
     pub score: u8,
     pub score_display: String,
     pub label: String,
@@ -40,6 +41,7 @@ pub struct ScoreSummary {
     pub incomplete: bool,
     pub negatives: Vec<FactorRow>,
     pub positives: Vec<FactorRow>,
+    #[allow(dead_code)] // kept for potential debug export; not shown on product page
     pub explanation_lines: Vec<String>,
     pub missing: Vec<String>,
 }

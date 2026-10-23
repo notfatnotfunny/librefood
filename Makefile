@@ -1,13 +1,14 @@
 # Librefood — build + install (binary, .desktop, launcher icons)
 #
-#   make              # release build
-#   make install      # install to $(PREFIX) (default: ~/.local)
-#   make uninstall
+#   make                 # release build
+#   sudo make install    # system install → /usr/bin + /usr/share/applications + icons
+#   sudo make uninstall
 #
 # Override:  make install PREFIX=/usr/local
-# Staging:   make install DESTDIR=/tmp/stage PREFIX=/usr
+# Staging:   make install DESTDIR=/tmp/stage
+# User-local (optional): make install PREFIX=$$HOME/.local
 
-PREFIX  ?= $(HOME)/.local
+PREFIX  ?= /usr
 DESTDIR ?=
 BINDIR  := $(DESTDIR)$(PREFIX)/bin
 APPDIR  := $(DESTDIR)$(PREFIX)/share/applications
@@ -24,13 +25,6 @@ all: build
 build:
 	cargo build --release
 
-# Persist preview rotate for all launches (drawer + CLI). Example: make set-rotate ANGLE=90
-ANGLE ?= 90
-set-rotate:
-	mkdir -p $(HOME)/.config/librefood
-	printf '%s\n' "$(ANGLE)" > $(HOME)/.config/librefood/camera-rotate
-	@echo "Wrote $(HOME)/.config/librefood/camera-rotate → $(ANGLE) (env LIBREFOOD_CAMERA_ROTATE still wins)"
-
 install: build
 	install -Dm755 $(BINARY) $(BINDIR)/librefood
 	install -Dm644 $(DESKTOP) $(APPDIR)/$(APPID).desktop
@@ -44,7 +38,7 @@ install: build
 		$(ICONDIR)/64x64/apps/$(APPID).png
 	-update-desktop-database $(DESTDIR)$(PREFIX)/share/applications 2>/dev/null
 	-gtk-update-icon-cache -f -t $(DESTDIR)$(PREFIX)/share/icons/hicolor 2>/dev/null
-	@echo "Installed librefood → $(PREFIX) (ensure $(PREFIX)/bin is on PATH)"
+	@echo "Installed librefood → $(PREFIX)/bin and $(PREFIX)/share/applications/$(APPID).desktop"
 
 uninstall:
 	rm -f $(BINDIR)/librefood
@@ -55,6 +49,13 @@ uninstall:
 	rm -f $(ICONDIR)/64x64/apps/$(APPID).png
 	-update-desktop-database $(DESTDIR)$(PREFIX)/share/applications 2>/dev/null
 	-gtk-update-icon-cache -f -t $(DESTDIR)$(PREFIX)/share/icons/hicolor 2>/dev/null
+
+# Persist preview rotate for all launches. Example: make set-rotate ANGLE=90
+ANGLE ?= 90
+set-rotate:
+	mkdir -p $(HOME)/.config/librefood
+	printf '%s\n' "$(ANGLE)" > $(HOME)/.config/librefood/camera-rotate
+	@echo "Wrote $(HOME)/.config/librefood/camera-rotate → $(ANGLE) (env LIBREFOOD_CAMERA_ROTATE still wins)"
 
 clean:
 	cargo clean

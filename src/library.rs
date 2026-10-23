@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const HISTORY_CAP: usize = 100;
 
 /// Shared snapshot of a looked-up product for history / favorites lists.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryEntry {
     pub barcode: String,
     pub name: String,
@@ -21,6 +21,9 @@ pub struct LibraryEntry {
     pub profile_name: Option<String>,
     /// Unix timestamp (seconds).
     pub timestamp: u64,
+    /// Full product model for offline open (absent on older history.json rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<ProductModel>,
 }
 
 impl LibraryEntry {
@@ -37,6 +40,7 @@ impl LibraryEntry {
             profile_id: Some(summary.profile_id.clone()),
             profile_name: Some(summary.profile_name.clone()),
             timestamp: now_secs(),
+            product: Some(product.clone()),
         }
     }
 
@@ -54,6 +58,13 @@ impl LibraryEntry {
         }
         parts.push(format_timestamp(self.timestamp));
         parts.join(" · ")
+    }
+
+    /// Cached product usable for the product page without a network round-trip.
+    pub fn cached_product(&self) -> Option<&ProductModel> {
+        self.product
+            .as_ref()
+            .filter(|p| !p.barcode.is_empty() && !p.name.is_empty())
     }
 }
 
@@ -134,12 +145,21 @@ impl HistoryStore {
         &self.entries
     }
 
+    pub fn find(&self, barcode: &str) -> Option<&LibraryEntry> {
+        self.entries.iter().find(|e| e.barcode == barcode)
+    }
+
     pub fn record(&mut self, entry: LibraryEntry) -> Result<(), String> {
         self.entries.retain(|e| e.barcode != entry.barcode);
         self.entries.insert(0, entry);
         if self.entries.len() > HISTORY_CAP {
             self.entries.truncate(HISTORY_CAP);
         }
+        save_entries(&self.path, &self.entries)
+    }
+
+    pub fn remove(&mut self, barcode: &str) -> Result<(), String> {
+        self.entries.retain(|e| e.barcode != barcode);
         save_entries(&self.path, &self.entries)
     }
 
@@ -168,6 +188,10 @@ impl FavoritesStore {
 
     pub fn entries(&self) -> &[LibraryEntry] {
         &self.entries
+    }
+
+    pub fn find(&self, barcode: &str) -> Option<&LibraryEntry> {
+        self.entries.iter().find(|e| e.barcode == barcode)
     }
 
     pub fn contains(&self, barcode: &str) -> bool {
@@ -199,6 +223,33 @@ impl FavoritesStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::product::{attrs, AttrValue};
+    use std::collections::BTreeMap;
+
+    fn sample_product(barcode: &str, name: &str) -> ProductModel {
+        let mut attributes = BTreeMap::new();
+        attributes.insert(
+            attrs::SUGARS_100G.to_string(),
+            AttrValue::present(10.0, "test"),
+        );
+        ProductModel {
+            barcode: barcode.into(),
+            name: name.into(),
+            brands: Some("Brand".into()),
+            brand_primary: Some("Brand".into()),
+            quantity: None,
+            image_url: None,
+            image_bytes: Some(b"img".to_vec()),
+            nutriscore_grade: Some('d'),
+            nova_group: Some(4),
+            additives_tags: vec![],
+            allergen_tags: vec![],
+            categories_tags: vec![],
+            labels_tags: vec![],
+            ecoscore_grade: None,
+            attributes,
+        }
+    }
 
     #[test]
     fn history_dedupes_and_caps() {
@@ -218,6 +269,7 @@ mod tests {
                     profile_id: Some("nutrition-quality".into()),
                     profile_name: Some("General".into()),
                     timestamp: i,
+                    product: None,
                 })
                 .unwrap();
         }
@@ -234,34 +286,63 @@ mod tests {
                 profile_id: None,
                 profile_name: None,
                 timestamp: 9999,
+                product: Some(sample_product(&old, "Updated")),
             })
             .unwrap();
         assert_eq!(store.entries()[0].barcode, old);
         assert_eq!(store.entries()[0].name, "Updated");
+        assert!(store.entries()[0].cached_product().is_some());
         assert_eq!(store.entries().iter().filter(|e| e.barcode == old).count(), 1);
+        store.remove(&old).unwrap();
+        assert!(!store.entries().iter().any(|e| e.barcode == old));
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn favorites_toggle() {
+    fn favorites_toggle_persists_product() {
         let dir = std::env::temp_dir().join(format!("lf-fav-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let mut store = FavoritesStore::open(dir.join("favorites.json"));
+        let path = dir.join("favorites.json");
+        let mut store = FavoritesStore::open(path.clone());
+        let product = sample_product("3017620422003", "Nutella");
         let entry = LibraryEntry {
-            barcode: "3017620422003".into(),
-            name: "Nutella".into(),
-            brand: Some("Nutella".into()),
+            barcode: product.barcode.clone(),
+            name: product.name.clone(),
+            brand: product.brand_primary.clone(),
             score_display: Some("19/100".into()),
             score_label: Some("Poor".into()),
             profile_id: Some("nutrition-quality".into()),
             profile_name: Some("General nutritional quality".into()),
             timestamp: 1,
+            product: Some(product.clone()),
         };
         assert!(store.toggle(entry.clone()).unwrap());
         assert!(store.contains("3017620422003"));
+        // Reload from disk — product must round-trip.
+        let reloaded = FavoritesStore::open(path);
+        let cached = reloaded.find("3017620422003").unwrap().cached_product().unwrap();
+        assert_eq!(cached.name, "Nutella");
+        assert_eq!(cached.image_bytes.as_deref(), Some(b"img".as_slice()));
         assert!(!store.toggle(entry).unwrap());
         assert!(!store.contains("3017620422003"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_json_without_product_loads() {
+        let dir = std::env::temp_dir().join(format!("lf-legacy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+        fs::write(
+            &path,
+            r#"[{"barcode":"1","name":"Old","brand":null,"score_display":null,"score_label":null,"profile_id":null,"profile_name":null,"timestamp":1}]"#,
+        )
+        .unwrap();
+        let store = HistoryStore::open(path);
+        assert_eq!(store.entries().len(), 1);
+        assert!(store.entries()[0].product.is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 }

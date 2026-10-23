@@ -11,6 +11,8 @@ use crate::score::{self, FactorStatus, ScoreSummary};
 use crate::ui_profiles;
 use adw::prelude::AdwApplicationWindowExt;
 use gtk::gdk;
+use gtk::gdk_pixbuf::Pixbuf;
+use gtk::gio;
 use gtk::prelude::*;
 use relm4::prelude::*;
 use std::sync::atomic::Ordering;
@@ -840,24 +842,29 @@ fn rebuild_favorites_list(
     }
 }
 
+/// Compact list thumbnail — matches text-block height (Yuka-style), not full OFF art.
+const LIBRARY_THUMB_CSS_PX: i32 = 56;
+
 fn library_thumb(entry: &LibraryEntry) -> gtk::Widget {
     let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    frame.set_size_request(48, 48);
+    frame.set_size_request(LIBRARY_THUMB_CSS_PX, LIBRARY_THUMB_CSS_PX);
+    frame.set_hexpand(false);
+    frame.set_vexpand(false);
+    frame.set_halign(gtk::Align::Start);
     frame.set_valign(gtk::Align::Center);
+    frame.set_overflow(gtk::Overflow::Hidden);
     frame.add_css_class("library-thumb");
 
     if let Some(tex) = entry
         .product
         .as_ref()
-        .and_then(|p| texture_from_bytes(p.image_bytes.as_deref()))
+        .and_then(|p| library_thumb_texture(p.image_bytes.as_deref()))
     {
-        let pic = gtk::Picture::for_paintable(&tex);
-        pic.set_content_fit(gtk::ContentFit::Cover);
-        pic.set_can_shrink(true);
-        pic.set_size_request(48, 48);
-        pic.set_hexpand(true);
-        pic.set_vexpand(true);
-        frame.append(&pic);
+        let img = gtk::Image::from_paintable(Some(&tex));
+        img.set_pixel_size(LIBRARY_THUMB_CSS_PX);
+        img.set_hexpand(false);
+        img.set_vexpand(false);
+        frame.append(&img);
     } else {
         let placeholder = gtk::Image::from_icon_name("image-missing-symbolic");
         placeholder.set_pixel_size(22);
@@ -868,6 +875,35 @@ fn library_thumb(entry: &LibraryEntry) -> gtk::Widget {
         frame.append(&placeholder);
     }
     frame.upcast()
+}
+
+/// Decode + center-crop to a square texture at list-thumb resolution (2× for HiDPI).
+fn library_thumb_texture(bytes: Option<&[u8]>) -> Option<gdk::Texture> {
+    let bytes = bytes?;
+    let gbytes = gtk::glib::Bytes::from_owned(bytes.to_vec());
+    let stream = gio::MemoryInputStream::from_bytes(&gbytes);
+    let full = Pixbuf::from_stream(&stream, None::<&gio::Cancellable>).ok()?;
+    let w = full.width();
+    let h = full.height();
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let px = LIBRARY_THUMB_CSS_PX.saturating_mul(2).max(LIBRARY_THUMB_CSS_PX);
+    let (nw, nh) = if w < h {
+        let nw = px;
+        let nh = ((h as f64) * (px as f64) / (w as f64)).round() as i32;
+        (nw.max(1), nh.max(1))
+    } else {
+        let nh = px;
+        let nw = ((w as f64) * (px as f64) / (h as f64)).round() as i32;
+        (nw.max(1), nh.max(1))
+    };
+    let scaled = full.scale_simple(nw, nh, gtk::gdk_pixbuf::InterpType::Bilinear)?;
+    let x = ((nw - px) / 2).max(0);
+    let y = ((nh - px) / 2).max(0);
+    let side = px.min(nw).min(nh);
+    let cropped = scaled.new_subpixbuf(x, y, side, side);
+    Some(gdk::Texture::for_pixbuf(&cropped))
 }
 
 fn library_entry_row(
@@ -911,6 +947,7 @@ fn library_entry_row(
 
     let remove = gtk::Button::with_label("Remove");
     remove.add_css_class("flat");
+    remove.set_valign(gtk::Align::Center);
     let sender3 = sender.clone();
     remove.connect_clicked(move |_| {
         sender3.input(remove_msg.clone());
@@ -3214,9 +3251,11 @@ fn load_css() {
             opacity: 1;
         }
         .library-thumb {
-            min-width: 48px;
-            min-height: 48px;
-            border-radius: 10px;
+            min-width: 56px;
+            min-height: 56px;
+            max-width: 56px;
+            max-height: 56px;
+            border-radius: 8px;
             overflow: hidden;
             background: alpha(@card_fg_color, 0.06);
         }
@@ -3224,7 +3263,7 @@ fn load_css() {
             opacity: 0.75;
         }
         .library-row {
-            padding: 6px 0;
+            padding: 8px 0;
             border-bottom: 1px solid alpha(@card_fg_color, 0.08);
         }
         .profile-row {

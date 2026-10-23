@@ -6,6 +6,7 @@ mod engine;
 mod library;
 mod logo;
 mod nav_icons;
+mod stat_icons;
 mod off;
 mod product;
 mod profiles;

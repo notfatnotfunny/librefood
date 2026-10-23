@@ -22,6 +22,7 @@ impl From<Tone> for FactorStatus {
 
 #[derive(Debug, Clone)]
 pub struct FactorRow {
+    pub attribute: String,
     pub title: String,
     pub detail: String,
     pub value_label: String,
@@ -76,6 +77,7 @@ pub fn summary_from_result(result: &ScoreResult) -> ScoreSummary {
             format!("{rule_bit} · src {}", c.source)
         };
         let row = FactorRow {
+            attribute: c.attribute.clone(),
             title: c.title.clone(),
             detail,
             value_label: c.value_label.clone(),

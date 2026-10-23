@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Msg {
     BarcodeChanged(String),
     SearchChanged(String),
@@ -52,7 +52,6 @@ pub enum Msg {
     /// Tear down editor widgets after Save/Cancel (never from the Save button stack).
     ClearProfileEditor,
     Rescore,
-    CompareProfiles,
     ShowPage(AppPage),
     /// Open a Search-tab sub-page (hub / camera / text / ean / product).
     OpenSearchPane(SearchPane),
@@ -795,44 +794,11 @@ fn rebuild_history_list(
         return;
     }
     for entry in filtered {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        row.set_hexpand(true);
-        row.add_css_class("library-row");
-
-        let btn = gtk::Button::new();
-        btn.set_hexpand(true);
-        btn.add_css_class("flat");
-        let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        let title = gtk::Label::new(Some(&entry.name));
-        title.add_css_class("factor-title");
-        title.set_halign(gtk::Align::Start);
-        title.set_xalign(0.0);
-        title.set_wrap(true);
-        let sub = gtk::Label::new(Some(&entry.subtitle()));
-        sub.add_css_class("factor-detail");
-        sub.set_halign(gtk::Align::Start);
-        sub.set_xalign(0.0);
-        sub.set_wrap(true);
-        col.append(&title);
-        col.append(&sub);
-        btn.set_child(Some(&col));
-        let code = entry.barcode.clone();
-        let sender2 = sender.clone();
-        btn.connect_clicked(move |_| {
-            sender2.input(Msg::OpenLibraryBarcode(code.clone()));
-        });
-
-        let remove = gtk::Button::with_label("Remove");
-        remove.add_css_class("flat");
-        let code2 = entry.barcode.clone();
-        let sender3 = sender.clone();
-        remove.connect_clicked(move |_| {
-            sender3.input(Msg::RemoveHistory(code2.clone()));
-        });
-
-        row.append(&btn);
-        row.append(&remove);
-        container.append(&row);
+        container.append(&library_entry_row(
+            entry,
+            sender,
+            Msg::RemoveHistory(entry.barcode.clone()),
+        ));
     }
 
     if !entries.is_empty() {
@@ -866,53 +832,103 @@ fn rebuild_favorites_list(
         return;
     }
     for entry in entries {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        row.set_hexpand(true);
-        row.add_css_class("library-row");
-
-        let btn = gtk::Button::new();
-        btn.set_hexpand(true);
-        btn.add_css_class("flat");
-        let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        let title = gtk::Label::new(Some(&entry.name));
-        title.add_css_class("factor-title");
-        title.set_halign(gtk::Align::Start);
-        title.set_xalign(0.0);
-        title.set_wrap(true);
-        let sub = gtk::Label::new(Some(&entry.subtitle()));
-        sub.add_css_class("factor-detail");
-        sub.set_halign(gtk::Align::Start);
-        sub.set_xalign(0.0);
-        sub.set_wrap(true);
-        col.append(&title);
-        col.append(&sub);
-        btn.set_child(Some(&col));
-        let code = entry.barcode.clone();
-        let sender2 = sender.clone();
-        btn.connect_clicked(move |_| {
-            sender2.input(Msg::OpenLibraryBarcode(code.clone()));
-        });
-
-        let remove = gtk::Button::with_label("Remove");
-        remove.add_css_class("flat");
-        let code2 = entry.barcode.clone();
-        let sender3 = sender.clone();
-        remove.connect_clicked(move |_| {
-            sender3.input(Msg::RemoveFavorite(code2.clone()));
-        });
-
-        row.append(&btn);
-        row.append(&remove);
-        container.append(&row);
+        container.append(&library_entry_row(
+            entry,
+            sender,
+            Msg::RemoveFavorite(entry.barcode.clone()),
+        ));
     }
+}
+
+fn library_thumb(entry: &LibraryEntry) -> gtk::Widget {
+    let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    frame.set_size_request(48, 48);
+    frame.set_valign(gtk::Align::Center);
+    frame.add_css_class("library-thumb");
+
+    if let Some(tex) = entry
+        .product
+        .as_ref()
+        .and_then(|p| texture_from_bytes(p.image_bytes.as_deref()))
+    {
+        let pic = gtk::Picture::for_paintable(&tex);
+        pic.set_content_fit(gtk::ContentFit::Cover);
+        pic.set_can_shrink(true);
+        pic.set_size_request(48, 48);
+        pic.set_hexpand(true);
+        pic.set_vexpand(true);
+        frame.append(&pic);
+    } else {
+        let placeholder = gtk::Image::from_icon_name("image-missing-symbolic");
+        placeholder.set_pixel_size(22);
+        placeholder.set_halign(gtk::Align::Center);
+        placeholder.set_valign(gtk::Align::Center);
+        placeholder.set_hexpand(true);
+        placeholder.set_vexpand(true);
+        frame.append(&placeholder);
+    }
+    frame.upcast()
+}
+
+fn library_entry_row(
+    entry: &LibraryEntry,
+    sender: &ComponentSender<AppModel>,
+    remove_msg: Msg,
+) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.set_hexpand(true);
+    row.add_css_class("library-row");
+
+    let btn = gtk::Button::new();
+    btn.set_hexpand(true);
+    btn.add_css_class("flat");
+    let inner = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    inner.set_hexpand(true);
+    inner.append(&library_thumb(entry));
+
+    let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    col.set_hexpand(true);
+    let title = gtk::Label::new(Some(&entry.name));
+    title.add_css_class("factor-title");
+    title.set_halign(gtk::Align::Start);
+    title.set_xalign(0.0);
+    title.set_wrap(true);
+    let sub = gtk::Label::new(Some(&entry.subtitle()));
+    sub.add_css_class("factor-detail");
+    sub.set_halign(gtk::Align::Start);
+    sub.set_xalign(0.0);
+    sub.set_wrap(true);
+    col.append(&title);
+    col.append(&sub);
+    inner.append(&col);
+    btn.set_child(Some(&inner));
+
+    let code = entry.barcode.clone();
+    let sender2 = sender.clone();
+    btn.connect_clicked(move |_| {
+        sender2.input(Msg::OpenLibraryBarcode(code.clone()));
+    });
+
+    let remove = gtk::Button::with_label("Remove");
+    remove.add_css_class("flat");
+    let sender3 = sender.clone();
+    remove.connect_clicked(move |_| {
+        sender3.input(remove_msg.clone());
+    });
+
+    row.append(&btn);
+    row.append(&remove);
+    row
 }
 
 fn append_factor_rows(container: &gtk::Box, rows: &[score::FactorRow]) {
     clear_box(container);
     for row in rows {
-        let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         line.set_hexpand(true);
         line.add_css_class("factor-row");
+
+        line.append(&crate::stat_icons::image_for_attribute(&row.attribute));
 
         let text_col = gtk::Box::new(gtk::Orientation::Vertical, 2);
         text_col.set_hexpand(true);
@@ -1546,15 +1562,6 @@ impl Component for AppModel {
                                     },
                                 },
                                 gtk::Button {
-                                    set_label: "Compare",
-                                    set_valign: gtk::Align::Center,
-                                    #[watch]
-                                    set_sensitive: model.product.is_some(),
-                                    connect_clicked[sender] => move |_| {
-                                        sender.input(Msg::CompareProfiles);
-                                    },
-                                },
-                                gtk::Button {
                                     #[watch]
                                     set_label: model.favorite_button_label(),
                                     set_valign: gtk::Align::Center,
@@ -1937,8 +1944,9 @@ impl Component for AppModel {
         model.rebuild_profile_lists();
         model.selected_profile_id = Some(model.store.active_id().to_string());
 
-        // Register bundled nav SVGs before the bottom bar resolves icon names.
+        // Register bundled nav + factor-stat SVGs before widgets resolve icon names.
         crate::nav_icons::install();
+        crate::stat_icons::install();
         let widgets = view_output!();
         load_css();
         logo::apply_window_icon(&root);
@@ -2343,28 +2351,6 @@ impl Component for AppModel {
                     append_factor_rows(&widgets.negatives_list, &s.negatives);
                     append_factor_rows(&widgets.positives_list, &s.positives);
                 }
-            }
-            Msg::CompareProfiles => {
-                let Some(product) = &self.product else {
-                    self.status_text = "Search a product before comparing profiles.".into();
-                    self.update_view(widgets, sender);
-                    return;
-                };
-                let mut lines = Vec::new();
-                for p in self.store.list() {
-                    let r = engine::evaluate(product, p);
-                    let active = if p.id == self.store.active_id() {
-                        " ← active"
-                    } else {
-                        ""
-                    };
-                    lines.push(format!(
-                        "{} → {} ({}){active}",
-                        p.name, r.score_display, r.label
-                    ));
-                }
-                self.status_kind = StatusKind::Success;
-                self.status_text = format!("Compare: {}", lines.join(" · "));
             }
             Msg::ShowPage(page) => {
                 if page != AppPage::Profiles {
@@ -3226,6 +3212,16 @@ fn load_css() {
             background-color: alpha(@window_fg_color, 0.08);
             box-shadow: none;
             opacity: 1;
+        }
+        .library-thumb {
+            min-width: 48px;
+            min-height: 48px;
+            border-radius: 10px;
+            overflow: hidden;
+            background: alpha(@card_fg_color, 0.06);
+        }
+        .factor-stat-icon {
+            opacity: 0.75;
         }
         .library-row {
             padding: 6px 0;
